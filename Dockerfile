@@ -4,20 +4,23 @@ LABEL org.opencontainers.image.source="https://github.com/htharshtripathi2012-co
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    CHESS_BIND_HOST=0.0.0.0 \
-    CHESS_PORT=8000 \
-    CHESS_OPEN_BROWSER=0
+    CHAT_BIND_HOST=0.0.0.0 \
+    CHAT_PORT=8000 \
+    CHAT_OPEN_BROWSER=false \
+    CHAT_DB_PATH=/data/commonroom.sqlite3
 
 WORKDIR /app
 
-COPY chess.py clocks.py lan.py rooms.py web.py main.py ./
+COPY chat_store.py lan.py web.py ./
 COPY static/ ./static/
 
-RUN groupadd --system --gid 10001 chess \
-    && useradd --system --uid 10001 --gid chess --no-create-home chess
+RUN groupadd --system --gid 10001 commonroom \
+    && useradd --system --uid 10001 --gid commonroom --no-create-home commonroom \
+    && mkdir -p /data \
+    && chown commonroom:commonroom /data
 
 USER 10001:10001
 
 EXPOSE 8000
 
-CMD ["python", "main.py"]
+CMD ["python", "web.py"]

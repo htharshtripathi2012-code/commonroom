@@ -1,3 +1,8 @@
+"""Progressively enhanced, server-rendered LAN team chat."""
+
+from __future__ import annotations
+
+import html
 import json
 import mimetypes
 import os
@@ -5,15 +10,13 @@ import threading
 import time
 import uuid
 import webbrowser
-from dataclasses import asdict
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
-from chess import Game, board_creation
-from clocks import ChessClock
+from chat_store import ChatError, ChatStore
 from lan import get_lan_ipv4
-from rooms import RoomError, RoomManager
 
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -21,421 +24,669 @@ _STATIC_FILES = {
     "/static/style.css": _STATIC_DIR / "style.css",
     "/static/app.js": _STATIC_DIR / "app.js",
 }
-_LOCK = threading.RLock()
-_ROOMS = RoomManager()
-_ROOM_CLOCKS: dict[str, ChessClock] = {}
-_ROOM_CLOCK_SETTINGS: dict[str, dict[str, int]] = {}
-_HOTSEAT_GAME = board_creation()
-_HOTSEAT_CLOCK_SETTINGS = {"initial_seconds": 300, "increment_seconds": 0}
-_HOTSEAT_CLOCK = ChessClock(**_HOTSEAT_CLOCK_SETTINGS)
-_HOTSEAT_CLOCK.start("white")
+_COOKIE_NAME = "lan_chat_session"
+_BODY_LIMIT = 16_384
 
 
-def _clock_state(clock: ChessClock) -> dict:
-    return {
-        "remaining_seconds": {
-            color: max(0, round(clock.remaining(color), 1))
-            for color in ("white", "black")
-        },
-        "flagged_color": clock.flagged_color,
-    }
+def _escape(value) -> str:
+    return html.escape(str(value), quote=True)
 
 
-def _game_state(
-    game: Game,
-    clock: ChessClock,
-    clock_settings: dict[str, int],
-    selected_square: str | None = None,
-    mode: str = "hotseat",
-    room_code: str | None = None,
-    player_color: str | None = None,
-    waiting: bool = False,
-    protocol_status: str | None = None,
-    protocol_winner: str | None = None,
-    draw_offer_by: str | None = None,
-    chat_messages: list[dict] | None = None,
-) -> dict:
-    checkmate = game.is_checkmate()
-    stalemate = game.is_stalemate()
-    clock_data = _clock_state(clock)
-    flagged_color = clock_data["flagged_color"]
-    status = protocol_status
-    if status in (None, "active", "waiting"):
-        if checkmate:
-            status = "checkmate"
-        elif stalemate:
-            status = "stalemate"
-        elif flagged_color is not None:
-            status = "timeout"
-        elif waiting:
-            status = "waiting"
-        else:
-            status = "active"
-
-    winner = protocol_winner
-    if checkmate:
-        winner = "black" if game.turn == "white" else "white"
-    elif status == "timeout":
-        winner = "black" if flagged_color == "white" else "white"
-
-    state = {
-        "pieces": [
-            {
-                "square": square,
-                "name": piece.name,
-                "color": piece.color,
-                "symbol": piece.symbol,
-            }
-            for square, piece in game.board.squares.items()
-        ],
-        "turn": game.turn,
-        "check": game.is_in_check(),
-        "checkmate": checkmate,
-        "stalemate": stalemate,
-        "timed_out": flagged_color is not None,
-        "winner": winner,
-        "game_over": status in (
-            "checkmate", "stalemate", "timeout", "draw", "resigned"
-        ),
-        "waiting": waiting,
-        "mode": mode,
-        "room_code": room_code,
-        "player_color": player_color,
-        "clock": {**clock_settings, **clock_data},
-        "legal_moves": (
-            game.get_legal_moves(selected_square) if selected_square is not None else []
-        ),
-    }
-    if mode == "online":
-        state.update(
-            {
-                "status": status,
-                "draw_offer_by": draw_offer_by if status == "active" else None,
-                "chat_messages": chat_messages or [],
-                "moves": [asdict(move) for move in game.move_history],
-            }
-        )
-    return state
-
-
-def _clock_settings(payload: dict) -> dict[str, int]:
-    initial_seconds = payload.get("initial_seconds", 300)
-    increment_seconds = payload.get("increment_seconds", 0)
+def _safe_return_to(value: str | None) -> str:
+    if not isinstance(value, str) or not value.startswith("/") or value.startswith("//"):
+        return "/"
+    parsed = urlsplit(value)
     if (
-        isinstance(initial_seconds, bool)
-        or not isinstance(initial_seconds, int)
-        or not 10 <= initial_seconds <= 3600
+        parsed.scheme
+        or parsed.netloc
+        or "\\" in value
+        or not value.isascii()
+        or any(ord(character) < 32 for character in value)
     ):
-        raise ValueError("Initial clock time must be between 10 and 3600 seconds")
-    if (
-        isinstance(increment_seconds, bool)
-        or not isinstance(increment_seconds, int)
-        or not 0 <= increment_seconds <= 60
-    ):
-        raise ValueError("Clock increment must be between 0 and 60 seconds")
-    return {
-        "initial_seconds": initial_seconds,
-        "increment_seconds": increment_seconds,
-    }
+        return "/"
+    return value
 
 
-def _read_payload(handler: BaseHTTPRequestHandler) -> dict:
+def _int_value(value: str | None, label: str) -> int:
     try:
-        length = int(handler.headers.get("Content-Length", "0"))
-        if length <= 0 or length > 4096:
-            raise ValueError("Request body must be between 1 and 4096 bytes")
-        payload = json.loads(handler.rfile.read(length))
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
-        raise ValueError("Request body must contain valid JSON") from error
-    if not isinstance(payload, dict):
-        raise ValueError("Request body must be a JSON object")
-    return payload
+        result = int(value or "")
+    except (TypeError, ValueError) as error:
+        raise ChatError(f"Choose a valid {label}.") from error
+    if result <= 0:
+        raise ChatError(f"Choose a valid {label}.")
+    return result
 
 
-def _get_room(code: str):
-    if not isinstance(code, str) or not code.strip():
-        raise ValueError("Room code is required")
-    return _ROOMS.get_room(code.strip())
+def _url(path: str, **params) -> str:
+    return f"{path}?{urlencode({key: value for key, value in params.items() if value is not None})}"
 
 
-def _room_game_state(room, player_color: str, selected_square: str | None = None) -> dict:
-    protocol = _ROOMS.protocol_state(room.code)
-    clock = _ROOM_CLOCKS[room.code]
-    status = protocol["status"]
-    if status == "active" and clock.flagged_color is not None:
-        status = "timeout"
-    return _game_state(
-        room.game,
-        clock,
-        _ROOM_CLOCK_SETTINGS[room.code],
-        selected_square,
-        mode="online",
-        room_code=room.code,
-        player_color=player_color,
-        waiting=not room.started,
-        protocol_status=status,
-        protocol_winner=protocol["winner"],
-        draw_offer_by=(
-            protocol["draw_offer_by"] if status == "active" else None
-        ),
-        chat_messages=protocol["chat_messages"],
+def _render_auth_page(
+    title: str,
+    description: str,
+    form: str,
+    error: str = "",
+) -> str:
+    message = (
+        f'<p class="notice error" role="alert">{_escape(error)}</p>' if error else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101317">
+  <title>{_escape(title)} · Commonroom</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <a class="wordmark" href="/"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</a>
+    <section class="auth-card">
+      <p class="eyebrow">PRIVATE LAN WORKSPACE</p>
+      <h1>{_escape(title)}</h1>
+      <p class="muted">{_escape(description)}</p>
+      {message}
+      {form}
+    </section>
+    <p class="auth-footnote">Hosted on your local network. Open this site from any device on the same Wi-Fi.</p>
+  </main>
+</body>
+</html>"""
+
+
+def _render_message(
+    message: dict,
+    *,
+    team_id: int,
+    kind: str,
+    conversation_id: int,
+    threaded: bool = False,
+) -> str:
+    timestamp = _escape(message["created_at"])
+    display_time = _escape(message["created_at"].replace("T", " ")[:16])
+    thread_link = ""
+    if not threaded and message["parent_id"] is None:
+        context = {"team": team_id, "thread": message["id"]}
+        context["channel" if kind == "channel" else "dm"] = conversation_id
+        thread_link = (
+            f'<a class="thread-link" href="{_url("/", **context)}">Reply in thread</a>'
+        )
+    return f"""<li class="message" data-message-id="{message["id"]}">
+  <div class="message-meta"><strong>{_escape(message["author"])}</strong><time datetime="{timestamp}">{display_time}</time></div>
+  <p>{_escape(message["body"])}</p>{thread_link}
+</li>"""
+
+
+def _message_feed(
+    messages: list[dict],
+    *,
+    team_id: int,
+    kind: str,
+    conversation_id: int,
+    parent_id: int | None = None,
+) -> str:
+    latest = messages[-1]["id"] if messages else (parent_id or 0)
+    items = "".join(
+        _render_message(
+            message,
+            team_id=team_id,
+            kind=kind,
+            conversation_id=conversation_id,
+            threaded=parent_id is not None,
+        )
+        for message in messages
+    )
+    if not items:
+        items = '<li class="empty-feed">No messages yet. Start the conversation.</li>'
+    parent_attribute = "" if parent_id is None else f' data-parent="{parent_id}"'
+    return (
+        f'<ol class="message-feed" data-kind="{kind}" data-team="{team_id}" '
+        f'data-id="{conversation_id}" data-after="{latest}"{parent_attribute}>'
+        f"{items}</ol>"
     )
 
 
-def _require_active_room(room) -> None:
-    if not room.started:
-        raise ValueError("Waiting for the other player to join")
-    if _ROOM_CLOCKS[room.code].flagged_color is not None:
-        raise ValueError("The game is over: a player's clock has expired")
-    if _ROOMS.protocol_state(room.code)["status"] != "active":
-        raise ValueError("The game is over")
+def _render_workspace(
+    store: ChatStore,
+    user: dict,
+    csrf_token: str,
+    query: dict[str, list[str]],
+) -> str:
+    error = query.get("error", [""])[0][:250]
+    teams = store.list_teams(user["id"])
+    requested_team = query.get("team", [None])[0]
+    team = None
+    if requested_team:
+        try:
+            team = store.get_team(int(requested_team), user["id"])
+        except (ValueError, ChatError):
+            team = None
+    if team is None and teams:
+        team = teams[0]
+
+    active_context: dict = {}
+    channels: list[dict] = []
+    direct_messages: list[dict] = []
+    if team is not None:
+        channels = store.list_channels(team["id"], user["id"])
+        direct_messages = store.list_direct_messages(team["id"], user["id"])
+
+    requested_dm = query.get("dm", [None])[0]
+    requested_channel = query.get("channel", [None])[0]
+    selected_dm = None
+    selected_channel = None
+    if team is not None and requested_dm:
+        selected_dm = next(
+            (item for item in direct_messages if str(item["id"]) == requested_dm),
+            None,
+        )
+    if team is not None and selected_dm is None:
+        selected_channel = next(
+            (item for item in channels if str(item["id"]) == requested_channel),
+            None,
+        )
+        if selected_channel is None and channels:
+            selected_channel = channels[0]
+
+    kind = "dm" if selected_dm else "channel"
+    conversation_id = (
+        selected_dm["id"] if selected_dm else selected_channel["id"] if selected_channel else None
+    )
+    active_context = {"team": team["id"]} if team else {}
+    if selected_dm:
+        active_context["dm"] = selected_dm["id"]
+        heading = selected_dm["username"]
+        subheading = "Direct message"
+    elif selected_channel:
+        active_context["channel"] = selected_channel["id"]
+        heading = f"#{selected_channel['name']}"
+        subheading = f"Channel in {team['name']}"
+    else:
+        heading = "Your workspace"
+        subheading = "Create a team or join one with an invite code."
+
+    messages: list[dict] = []
+    thread_root = None
+    thread_messages: list[dict] = []
+    thread_value = query.get("thread", [None])[0]
+    if team is not None and conversation_id is not None:
+        messages = store.list_messages(
+            user["id"], kind, conversation_id, parent_id=None
+        )
+        if thread_value:
+            try:
+                root = store.get_message(user["id"], _int_value(thread_value, "thread"))
+                expected_field = "channel_id" if kind == "channel" else "direct_message_id"
+                if (
+                    root["team_id"] == team["id"]
+                    and root[expected_field] == conversation_id
+                    and root["parent_id"] is None
+                ):
+                    thread_root = root
+                    thread_messages = store.list_messages(
+                        user["id"],
+                        kind,
+                        conversation_id,
+                        parent_id=root["id"],
+                    )
+            except ChatError:
+                thread_root = None
+
+    team_links = "".join(
+        f'<a class="team-link {"selected" if team and item["id"] == team["id"] else ""}" '
+        f'href="{_url("/", team=item["id"])}"><span class="team-avatar">{_escape(item["name"][:1].upper())}</span>'
+        f'<span>{_escape(item["name"])}</span></a>'
+        for item in teams
+    )
+    channel_links = "".join(
+        f'<a class="nav-link {"selected" if selected_channel and item["id"] == selected_channel["id"] else ""}" '
+        f'href="{_url("/", team=team["id"], channel=item["id"])}"><span>#</span>{_escape(item["name"])}</a>'
+        for item in channels
+    ) if team else ""
+    dm_links = "".join(
+        f'<a class="nav-link {"selected" if selected_dm and item["id"] == selected_dm["id"] else ""}" '
+        f'href="{_url("/", team=team["id"], dm=item["id"])}"><span class="dm-dot">●</span>{_escape(item["username"])}</a>'
+        for item in direct_messages
+    ) if team else ""
+
+    channel_select_options = "".join(
+        f'<option value="{item["id"]}">#{_escape(item["name"])}</option>'
+        for item in channels
+    )
+    dm_form = ""
+    if team:
+        members = store.list_members(team["id"], user["id"])
+        member_options = "".join(
+            f'<option value="{_escape(member["username"])}">{_escape(member["username"])}</option>'
+            for member in members if member["id"] != user["id"]
+        )
+        dm_form = f"""<form class="inline-form" action="/dms/create" method="post">
+  <input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+  <input type="hidden" name="team_id" value="{team["id"]}">
+  <label class="sr-only" for="dm-peer">Start a direct message</label>
+  <select id="dm-peer" name="username" required aria-label="Choose a team member">
+    <option value="">Message someone…</option>{member_options}
+  </select><button class="icon-button" type="submit" aria-label="Start direct message">+</button>
+</form>"""
+
+    error_notice = (
+        f'<p class="notice error" role="alert">{_escape(error)}</p>' if error else ""
+    )
+    team_forms = f"""<details class="sidebar-details">
+  <summary>New team</summary>
+  <form action="/teams/create" method="post" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+    <label for="team-name">Team name</label>
+    <input id="team-name" name="name" maxlength="60" required placeholder="Design crew">
+    <button class="small-button" type="submit">Create team</button>
+  </form>
+</details>
+<details class="sidebar-details">
+  <summary>Join a team</summary>
+  <form action="/teams/join" method="post" class="stack-form">
+    <input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+    <label for="invite-code">Invite code</label>
+    <input id="invite-code" name="invite_code" maxlength="20" required autocomplete="off">
+    <button class="small-button" type="submit">Join team</button>
+  </form>
+</details>"""
+
+    if team is None:
+        content = f"""<section class="welcome-card">
+  <span class="welcome-icon" aria-hidden="true">✦</span>
+  <p class="eyebrow">YOUR SPACE, YOUR PEOPLE</p>
+  <h1>Start a conversation.</h1>
+  <p>Create a team for your group or join an existing one with an invite code. Channels, DMs, and threaded replies are ready when you are.</p>
+  <div class="welcome-grid">
+    <div><h2>Create a team</h2><p>Name a workspace and invite your people with its code.</p></div>
+    <div><h2>Join a team</h2><p>Enter a code shared by someone on your network.</p></div>
+  </div>
+</section>"""
+    else:
+        if conversation_id is not None:
+            feed = _message_feed(
+                messages,
+                team_id=team["id"],
+                kind=kind,
+                conversation_id=conversation_id,
+            )
+            return_to = _url("/", **active_context)
+            composer = f"""<form class="composer" action="/messages/send" method="post">
+  <input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+  <input type="hidden" name="kind" value="{kind}">
+  <input type="hidden" name="conversation_id" value="{conversation_id}">
+  <input type="hidden" name="return_to" value="{_escape(return_to)}">
+  <label class="sr-only" for="message-body">Write a message</label>
+  <textarea id="message-body" name="body" rows="2" maxlength="4000" required placeholder="Message {_escape(heading)}"></textarea>
+  <button class="send-button" type="submit">Send <span aria-hidden="true">↗</span></button>
+</form>"""
+            thread_panel = ""
+            if thread_root:
+                thread_feed = _message_feed(
+                    thread_messages,
+                    team_id=team["id"],
+                    kind=kind,
+                    conversation_id=conversation_id,
+                    parent_id=thread_root["id"],
+                )
+                thread_return = _url("/", **active_context, thread=thread_root["id"])
+                thread_panel = f"""<aside class="thread-panel">
+  <div class="thread-heading"><div><p class="eyebrow">THREAD</p><h2>Replies</h2></div>
+    <a class="icon-button close-thread" href="{_url("/", **active_context)}" aria-label="Close thread">×</a>
+  </div>
+  <ol class="thread-root">{_render_message(thread_root, team_id=team["id"], kind=kind, conversation_id=conversation_id, threaded=True)}</ol>
+  {thread_feed}
+  <form class="composer thread-composer" action="/messages/send" method="post">
+    <input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+    <input type="hidden" name="kind" value="{kind}">
+    <input type="hidden" name="conversation_id" value="{conversation_id}">
+    <input type="hidden" name="parent_id" value="{thread_root["id"]}">
+    <input type="hidden" name="return_to" value="{_escape(thread_return)}">
+    <label class="sr-only" for="thread-body">Reply to thread</label>
+    <textarea id="thread-body" name="body" rows="2" maxlength="4000" required placeholder="Reply to thread…"></textarea>
+    <button class="send-button" type="submit">Reply</button>
+  </form>
+</aside>"""
+            content = f"""<section class="conversation">
+  <header class="conversation-heading">
+    <div><p class="eyebrow">{_escape(subheading)}</p><h1>{_escape(heading)}</h1></div>
+    <div class="live-tools"><span class="live-indicator"><i></i><span>Live</span></span>
+      <a class="refresh-link" href="{_url("/", **active_context)}">Refresh</a></div>
+  </header>
+  <div class="conversation-body {"has-thread" if thread_root else ""}">
+    <div class="feed-column">{feed}{composer}
+      <noscript><p class="noscript-note">Automatic updates need JavaScript. Use Refresh to check for new messages; sending works without JavaScript.</p></noscript>
+    </div>{thread_panel}
+  </div>
+</section>"""
+        else:
+            content = """<section class="welcome-card compact">
+  <p class="eyebrow">TEAM SPACE</p><h1>Your team is ready.</h1>
+  <p>Create a channel or start a direct message to begin chatting.</p>
+</section>"""
+
+    invite_banner = ""
+    if team:
+        invite_banner = (
+            f'<span class="invite-note">Invite code <code>{_escape(team["invite_code"])}</code></span>'
+        )
+    workspace = f"""<div class="workspace">
+  <aside class="sidebar" aria-label="Workspace navigation">
+    <a class="wordmark" href="/"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</a>
+    <div class="sidebar-scroll">
+      <div class="section-label">YOUR TEAMS</div>
+      <nav class="team-list" aria-label="Teams">{team_links or '<p class="sidebar-empty">No teams yet.</p>'}</nav>
+      {invite_banner}
+      {team_forms}
+      {f'<section class="nav-section"><div class="section-heading"><span>CHANNELS</span><span class="count">{len(channels)}</span></div><nav aria-label="Channels">{channel_links}</nav><details class="sidebar-details"><summary>Add channel</summary><form action="/channels/create" method="post" class="stack-form"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="team_id" value="{team["id"]}"><label for="channel-name">Channel name</label><input id="channel-name" name="name" maxlength="40" pattern="[a-zA-Z0-9_-]+" required placeholder="project-launch"><button class="small-button" type="submit">Create channel</button></form></details></section>' if team else ''}
+      {f'<section class="nav-section"><div class="section-heading"><span>DIRECT MESSAGES</span><span class="count">{len(direct_messages)}</span></div>{dm_form}<nav aria-label="Direct messages">{dm_links or "<p class=sidebar-empty>No direct messages yet.</p>"}</nav></section>' if team else ''}
+    </div>
+    <div class="user-card"><span class="user-avatar">{_escape(user["username"][:1].upper())}</span><div class="user-detail"><strong>{_escape(user["username"])}</strong><span>On this network</span></div>
+      <form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="logout-button" type="submit" aria-label="Log out">↗</button></form>
+    </div>
+  </aside>
+  <main class="main-pane">{error_notice}{content}</main>
+</div>"""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101317">
+  <title>{_escape(heading)} · Commonroom</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app-frame">{workspace}</div>
+</body>
+</html>"""
 
 
-class ChessRequestHandler(BaseHTTPRequestHandler):
-    def _run_request(self, handler) -> None:
+class ChatRequestHandler(BaseHTTPRequestHandler):
+    store: ChatStore
+
+    def _run_request(self, method_handler) -> None:
         self._request_id = uuid.uuid4().hex
         self._response_status = 500
         self._response_started = False
-        self._request_error = None
+        self._request_error = "-"
         started = time.monotonic()
         try:
-            handler()
+            method_handler()
         except Exception as error:
             trace = error.__traceback__
-            while trace.tb_next is not None:
+            while trace is not None and trace.tb_next is not None:
                 trace = trace.tb_next
-            location = Path(trace.tb_frame.f_code.co_filename).name
-            self._request_error = (
-                f"internal_error:{type(error).__name__}@"
-                f"{location}:{trace.tb_lineno}"
-            )
+            location = Path(trace.tb_frame.f_code.co_filename).name if trace else "unknown"
+            line = trace.tb_lineno if trace else 0
+            self._request_error = f"{type(error).__name__}@{location}:{line}"
             if not self._response_started:
-                self._send_json({"error": "Internal server error"}, status=500)
+                self._send_html(
+                    _render_auth_page(
+                        "Something went wrong",
+                        "The request could not be completed.",
+                        f'<p class="notice error">Reference {_escape(self._request_id)}</p><a class="button-link" href="/">Return home</a>',
+                    ),
+                    status=500,
+                )
         finally:
             duration_ms = round((time.monotonic() - started) * 1000, 1)
-            error = self._request_error or "-"
-            method = self.command if self.command in ("GET", "POST") else "OTHER"
             route = urlsplit(self.path).path
+            method = self.command if self.command in ("GET", "POST") else "OTHER"
             print(
-                f"[web] request_id={self._request_id} method={method} "
+                f"[chat] request_id={self._request_id} method={method} "
                 f"client={self.address_string()} route={route} "
-                f"status={self._response_status} "
-                f"duration_ms={duration_ms} "
-                f"error={error}"
+                f"status={self._response_status} duration_ms={duration_ms} "
+                f"error={self._request_error}"
             )
 
     def do_GET(self) -> None:
         self._run_request(self._handle_get)
+
+    def do_POST(self) -> None:
+        self._run_request(self._handle_post)
+
+    def _session(self) -> dict | None:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+        except Exception:
+            return None
+        morsel = cookie.get(_COOKIE_NAME)
+        return self.store.get_session(morsel.value if morsel else None)
 
     def _handle_get(self) -> None:
         request = urlsplit(self.path)
         if request.path == "/healthz":
             self._send_json({"status": "ok"})
             return
-
+        if request.path in _STATIC_FILES:
+            self._send_file(_STATIC_FILES[request.path])
+            return
+        if request.path == "/api/messages":
+            session = self._session()
+            if session is None:
+                self._send_json({"error": "Login required."}, status=401)
+                return
+            query = parse_qs(request.query)
+            try:
+                kind = query.get("kind", [""])[0]
+                conversation_id = _int_value(query.get("id", [None])[0], "conversation")
+                after_id = int(query.get("after", ["0"])[0])
+                parent_text = query.get("parent", [None])[0]
+                parent_id = _int_value(parent_text, "thread") if parent_text else None
+                messages = self.store.list_messages(
+                    session["user"]["id"], kind, conversation_id, after_id, parent_id
+                )
+            except (ChatError, ValueError) as error:
+                self._send_json({"error": str(error)}, status=400)
+                return
+            self._send_json({"messages": messages})
+            return
+        if request.path == "/login":
+            if self._session():
+                self._redirect("/")
+                return
+            query = parse_qs(request.query)
+            error = query.get("error", [""])[0][:250]
+            form = """<form action="/login" method="post" class="auth-form">
+  <label for="username">Username</label><input id="username" name="username" autocomplete="username" required autofocus>
+  <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button class="primary-button" type="submit">Log in</button>
+</form><p class="auth-switch">New here? <a href="/signup">Create an account</a></p>"""
+            self._send_html(_render_auth_page("Welcome back", "Sign in to your local workspace.", form, error))
+            return
+        if request.path == "/signup":
+            if self._session():
+                self._redirect("/")
+                return
+            query = parse_qs(request.query)
+            error = query.get("error", [""])[0][:250]
+            form = """<form action="/signup" method="post" class="auth-form">
+  <label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="30" pattern="[A-Za-z0-9_.-]+" autocomplete="username" required autofocus>
+  <label for="password">Password</label><input id="password" name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required>
+  <span class="field-help">Use at least 10 characters. Your account is stored on this server.</span>
+  <button class="primary-button" type="submit">Create account</button>
+</form><p class="auth-switch">Already have an account? <a href="/login">Log in</a></p>"""
+            self._send_html(_render_auth_page("Make yourself at home", "Create a local account to join teams and message people.", form, error))
+            return
         if request.path == "/":
-            self._send_file(_STATIC_DIR / "index.html")
+            session = self._session()
+            if session is None:
+                self._redirect("/login")
+                return
+            self._send_html(
+                _render_workspace(
+                    self.store,
+                    session["user"],
+                    session["csrf_token"],
+                    parse_qs(request.query),
+                )
+            )
             return
-
-        static_file = _STATIC_FILES.get(request.path)
-        if static_file is not None:
-            self._send_file(static_file)
-            return
-
-        query = parse_qs(request.query)
-        if request.path == "/api/state":
-            room_code = query.get("room", [None])[0]
-            selected = query.get("from", [None])[0]
-            token = query.get("token", [None])[0]
-            with _LOCK:
-                try:
-                    if room_code is None:
-                        state = _game_state(
-                            _HOTSEAT_GAME,
-                            _HOTSEAT_CLOCK,
-                            _HOTSEAT_CLOCK_SETTINGS,
-                            selected,
-                        )
-                    else:
-                        room = _get_room(room_code)
-                        player_color = room.player_color(token) if token else None
-                        if player_color is None:
-                            raise ValueError("A valid room player token is required")
-                        state = _room_game_state(room, player_color, selected)
-                except (KeyError, RoomError, ValueError) as error:
-                    self._send_json({"error": str(error)}, status=400)
-                    return
-            self._send_json(state)
-            return
-
-        if request.path == "/api/rooms/preview":
-            code = query.get("code", [None])[0]
-            with _LOCK:
-                try:
-                    room = _get_room(code)
-                    state = {
-                        "room_code": room.code,
-                        "started": room.started,
-                        "clock": _ROOM_CLOCK_SETTINGS[room.code],
-                    }
-                except (KeyError, RoomError, ValueError) as error:
-                    self._send_json({"error": str(error)}, status=404)
-                    return
-            self._send_json(state)
-            return
-
-        self._send_json({"error": "Not found"}, status=404)
-
-    def do_POST(self) -> None:
-        self._run_request(self._handle_post)
+        self._send_html(_render_auth_page("Not found", "That page does not exist.", '<a class="button-link" href="/">Return home</a>'), status=404)
 
     def _handle_post(self) -> None:
         request = urlsplit(self.path)
-        if request.path not in {
-            "/api/new-game",
-            "/api/rooms/create",
-            "/api/rooms/join",
-            "/api/rooms/chat",
-            "/api/rooms/draw",
-            "/api/rooms/resign",
-            "/api/move",
-        }:
-            self._send_json({"error": "Not found"}, status=404)
+        try:
+            form = self._read_form()
+        except ChatError as error:
+            self._redirect("/?" + urlencode({"error": str(error)}))
             return
+
+        if request.path == "/signup":
+            try:
+                user = self.store.create_user(
+                    form.get("username", ""), form.get("password", "")
+                )
+                token, _ = self.store.create_session(user["id"])
+            except ChatError as error:
+                self._redirect("/signup?" + urlencode({"error": str(error)}))
+                return
+            self._redirect("/", cookie=self._session_cookie(token))
+            return
+        if request.path == "/login":
+            user = self.store.authenticate(
+                form.get("username", ""), form.get("password", "")
+            )
+            if user is None:
+                self._redirect("/login?" + urlencode({"error": "Username or password is incorrect."}))
+                return
+            token, _ = self.store.create_session(user["id"])
+            self._redirect("/", cookie=self._session_cookie(token))
+            return
+
+        session = self._session()
+        if session is None:
+            self._redirect("/login")
+            return
+        if not hmac_compare(form.get("csrf_token", ""), session["csrf_token"]):
+            self._send_html(
+                _render_auth_page(
+                    "Session expired",
+                    "Refresh the page and submit the form again.",
+                    '<a class="button-link" href="/">Return home</a>',
+                ),
+                status=403,
+            )
+            return
+        user = session["user"]
+        return_to = _safe_return_to(form.get("return_to"))
 
         try:
-            payload = _read_payload(self) if self.headers.get("Content-Length") else {}
-            with _LOCK:
-                if request.path == "/api/new-game":
-                    global _HOTSEAT_GAME, _HOTSEAT_CLOCK, _HOTSEAT_CLOCK_SETTINGS
-                    settings = _clock_settings(payload)
-                    _HOTSEAT_GAME = board_creation()
-                    _HOTSEAT_CLOCK_SETTINGS = settings
-                    _HOTSEAT_CLOCK = ChessClock(**settings)
-                    _HOTSEAT_CLOCK.start("white")
-                    response = _game_state(
-                        _HOTSEAT_GAME, _HOTSEAT_CLOCK, _HOTSEAT_CLOCK_SETTINGS
-                    )
-                elif request.path == "/api/rooms/create":
-                    settings = _clock_settings(payload)
-                    room, token = _ROOMS.create_room()
-                    _ROOM_CLOCK_SETTINGS[room.code] = settings
-                    _ROOM_CLOCKS[room.code] = ChessClock(**settings)
-                    response = {
-                        "room_code": room.code,
-                        "player_token": token,
-                        "player_color": "white",
-                        "state": _room_game_state(room, "white"),
-                    }
-                elif request.path == "/api/rooms/join":
-                    code = payload.get("room_code")
-                    room = _get_room(code)
-                    room, token = _ROOMS.join_room(room.code)
-                    clock = _ROOM_CLOCKS[room.code]
-                    clock.start("white")
-                    response = {
-                        "room_code": room.code,
-                        "player_token": token,
-                        "player_color": "black",
-                        "state": _room_game_state(room, "black"),
-                    }
-                elif request.path in {
-                    "/api/rooms/chat",
-                    "/api/rooms/draw",
-                    "/api/rooms/resign",
-                }:
-                    room = _get_room(payload.get("room_code"))
-                    player_token = payload.get("player_token")
-                    player_color = _ROOMS.authenticate_player(
-                        room.code, player_token
-                    )
-                    _require_active_room(room)
-
-                    if request.path == "/api/rooms/chat":
-                        _ROOMS.submit_chat(
-                            room.code, player_token, payload.get("message")
-                        )
-                    elif request.path == "/api/rooms/draw":
-                        action = payload.get("action")
-                        _ROOMS.handle_draw_action(
-                            room.code, player_token, action
-                        )
-                        if action == "accept":
-                            _ROOM_CLOCKS[room.code].pause()
-                    else:
-                        clock = _ROOM_CLOCKS[room.code]
-                        clock.pause()
-                        if clock.flagged_color is not None:
-                            raise ValueError(
-                                "The game is over: a player's clock has expired"
-                            )
-                        _ROOMS.resign(room.code, player_token)
-                    response = {
-                        "state": _room_game_state(room, player_color)
-                    }
-                elif request.path == "/api/move":
-                    start = payload.get("from")
-                    end = payload.get("to")
-                    promotion = payload.get("promotion")
-                    if not isinstance(start, str) or not isinstance(end, str):
-                        raise ValueError("Move requires string 'from' and 'to' squares")
-
-                    room_code = payload.get("room_code")
-                    if room_code is None:
-                        game = _HOTSEAT_GAME
-                        clock = _HOTSEAT_CLOCK
-                        settings = _HOTSEAT_CLOCK_SETTINGS
-                        player_color = game.turn
-                        mode = "hotseat"
-                    else:
-                        room = _get_room(room_code)
-                        player_token = payload.get("player_token")
-                        if not isinstance(player_token, str):
-                            raise ValueError("A valid room player token is required")
-                        _require_active_room(room)
-                        room = _ROOMS.validate_move_submission(room.code, player_token)
-                        player_color = room.player_color(player_token)
-                        game = room.game
-                        clock = _ROOM_CLOCKS[room.code]
-                        settings = _ROOM_CLOCK_SETTINGS[room.code]
-                        mode = "online"
-
-                    clock.remaining(game.turn)
-                    if clock.flagged_color is not None:
-                        raise ValueError("The game is over: a player's clock has expired")
-                    if player_color != game.turn:
-                        raise ValueError(f"It is {game.turn}'s turn")
-                    result = game.play_move(start, end, promotion)
-                    clock.complete_move(
-                        result.color, game_over=result.checkmate or result.stalemate
-                    )
-                    if room_code is not None:
-                        _ROOMS.dismiss_draw_offer(
-                            room.code,
-                            result.color,
-                            game_over=result.checkmate or result.stalemate,
-                        )
-                    if room_code is not None:
-                        state = _room_game_state(room, player_color)
-                    else:
-                        state = _game_state(
-                            game, clock, settings, mode=mode,
-                            player_color=player_color,
-                        )
-                    response = {"result": asdict(result), "state": state}
-                else:
-                    self._send_json({"error": "Not found"}, status=404)
-                    return
-        except (KeyError, RoomError, TypeError, ValueError) as error:
-            self._send_json({"error": str(error)}, status=400)
+            if request.path == "/logout":
+                self.store.delete_session(self._session_token())
+                self._redirect("/login", cookie=self._expired_cookie())
+                return
+            if request.path == "/teams/create":
+                team = self.store.create_team(user["id"], form.get("name", ""))
+                channel = self.store.list_channels(team["id"], user["id"])[0]
+                self._redirect(_url("/", team=team["id"], channel=channel["id"]))
+                return
+            if request.path == "/teams/join":
+                team_id = self.store.join_team(
+                    user["id"], form.get("invite_code", "")
+                )
+                channel = self.store.list_channels(team_id, user["id"])[0]
+                self._redirect(_url("/", team=team_id, channel=channel["id"]))
+                return
+            if request.path == "/channels/create":
+                team_id = _int_value(form.get("team_id"), "team")
+                channel_id = self.store.create_channel(
+                    team_id, user["id"], form.get("name", "")
+                )
+                self._redirect(_url("/", team=team_id, channel=channel_id))
+                return
+            if request.path == "/dms/create":
+                team_id = _int_value(form.get("team_id"), "team")
+                dm_id = self.store.create_direct_message(
+                    team_id, user["id"], form.get("username", "")
+                )
+                self._redirect(_url("/", team=team_id, dm=dm_id))
+                return
+            if request.path == "/messages/send":
+                kind = form.get("kind", "")
+                conversation_id = _int_value(
+                    form.get("conversation_id"), "conversation"
+                )
+                parent_id = (
+                    _int_value(form.get("parent_id"), "thread")
+                    if form.get("parent_id")
+                    else None
+                )
+                self.store.send_message(
+                    user["id"],
+                    kind,
+                    conversation_id,
+                    form.get("body", ""),
+                    parent_id,
+                )
+                self._redirect(return_to)
+                return
+        except ChatError as error:
+            target = return_to if return_to != "/" else "/"
+            separator = "&" if "?" in target else "?"
+            self._redirect(f"{target}{separator}{urlencode({'error': str(error)})}")
             return
-        self._send_json(response)
+        self._send_html(
+            _render_auth_page("Not found", "That action does not exist.", '<a class="button-link" href="/">Return home</a>'),
+            status=404,
+        )
+
+    def _session_token(self) -> str | None:
+        cookie = SimpleCookie()
+        cookie.load(self.headers.get("Cookie", ""))
+        morsel = cookie.get(_COOKIE_NAME)
+        return morsel.value if morsel else None
+
+    def _read_form(self) -> dict[str, str]:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
+        if content_type != "application/x-www-form-urlencoded":
+            raise ChatError("Submit this form from the Commonroom page.")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as error:
+            raise ChatError("Invalid form size.") from error
+        if length <= 0 or length > _BODY_LIMIT:
+            raise ChatError("Form must be between 1 and 16384 bytes.")
+        try:
+            values = parse_qs(
+                self.rfile.read(length).decode("utf-8"),
+                keep_blank_values=True,
+                strict_parsing=False,
+            )
+        except UnicodeDecodeError as error:
+            raise ChatError("Form must contain valid UTF-8 text.") from error
+        return {key: items[0] for key, items in values.items() if items}
+
+    @staticmethod
+    def _session_cookie(token: str) -> str:
+        return f"{_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+
+    @staticmethod
+    def _expired_cookie() -> str:
+        return f"{_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+
+    def _redirect(self, target: str, cookie: str | None = None) -> None:
+        if not target.startswith("/") or target.startswith("//"):
+            target = "/"
+        self._response_status = 303
+        self._response_started = True
+        self.send_response(303)
+        self.send_header("Location", target)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
 
     def _send_file(self, path: Path) -> None:
         try:
             body = path.read_bytes()
         except FileNotFoundError:
-            self._send_json({"error": "Static file not found"}, status=404)
+            self._send_html("Not found", status=404)
             return
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self._response_status = 200
@@ -443,59 +694,80 @@ class ChessRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Request-ID", self._request_id)
+        self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_json(self, payload: dict, status: int = 200) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    def _send_html(self, body: str, status: int = 200) -> None:
+        encoded = body.encode("utf-8")
         self._response_status = status
         self._response_started = True
-        if status >= 400 and self._request_error is None:
-            self._request_error = "client_error" if status < 500 else "server_error"
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _send_json(self, payload: dict, status: int = 200) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._response_status = status
+        self._response_started = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-Request-ID", self._request_id)
+        self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(encoded)
 
     def log_message(self, format: str, *args) -> None:
         return
 
 
+def hmac_compare(left: str, right: str) -> bool:
+    import hmac
+
+    return isinstance(left, str) and hmac.compare_digest(left, right)
+
+
 def create_server(
-    port: int | None = None, host: str | None = None
+    port: int | None = None,
+    host: str | None = None,
+    db_path: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     if port is None:
-        port = int(os.environ.get("CHESS_PORT", "8000"))
+        port = int(os.environ.get("CHAT_PORT", "8000"))
     if host is None:
-        host = os.environ.get("CHESS_BIND_HOST") or get_lan_ipv4()
-    return ThreadingHTTPServer((host, port), ChessRequestHandler)
+        host = os.environ.get("CHAT_BIND_HOST") or get_lan_ipv4()
+    if db_path is None:
+        db_path = os.environ.get(
+            "CHAT_DB_PATH", str(Path(__file__).parent / "data" / "commonroom.sqlite3")
+        )
+    store = ChatStore(db_path)
+    handler = type("BoundChatRequestHandler", (ChatRequestHandler,), {"store": store})
+    return ThreadingHTTPServer((host, port), handler)
 
 
 def main() -> None:
+    if os.name == "posix":
+        os.umask(0o077)
     server = create_server()
     address, port = server.server_address
     wildcard_bind = address in ("0.0.0.0", "::")
     if wildcard_bind:
-        print(
-            f"Chess is listening on {address}:{port}; "
-            "use the address configured by your cluster ingress."
-        )
+        print(f"Commonroom is listening on {address}:{port}.")
     else:
         url = f"http://{address}:{port}"
-        print(f"Chess is available to devices on your Wi-Fi at {url}")
-
+        print(f"Commonroom is available to devices on your Wi-Fi at {url}")
     open_browser = os.environ.get(
-        "CHESS_OPEN_BROWSER", "false" if wildcard_bind else "true"
+        "CHAT_OPEN_BROWSER", "false" if wildcard_bind else "true"
     ).lower() in ("1", "true", "yes", "on")
     if open_browser and not wildcard_bind:
         webbrowser.open(f"http://{address}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping chess server.")
+        print("\nStopping Commonroom.")
     finally:
         server.server_close()
 

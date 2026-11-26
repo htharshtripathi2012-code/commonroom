@@ -4,9 +4,9 @@ metadata:
   name: chess
   namespace: argocd
   annotations:
-    argocd-image-updater.argoproj.io/image-list: chess=ghcr.io/htharshtripathi2012-code/chess:latest
-    argocd-image-updater.argoproj.io/chess.update-strategy: digest
-    argocd-image-updater.argoproj.io/chess.kustomize.image-name: ghcr.io/htharshtripathi2012-code/chess
+    argocd-image-updater.argoproj.io/image-list: commonroom=ghcr.io/htharshtripathi2012-code/chess:latest
+    argocd-image-updater.argoproj.io/commonroom.update-strategy: digest
+    argocd-image-updater.argoproj.io/commonroom.kustomize.image-name: ghcr.io/htharshtripathi2012-code/chess
     argocd-image-updater.argoproj.io/write-back-method: argocd
 spec:
   project: default
@@ -16,7 +16,7 @@ spec:
     path: deploy/k8s/overlays/k3s
   destination:
     server: https://kubernetes.default.svc
-    namespace: chess
+    namespace: commonroom
   syncPolicy:
     automated:
       prune: true

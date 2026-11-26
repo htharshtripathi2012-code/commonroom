@@ -1,44 +1,41 @@
-# Chess
+# Commonroom
 
-A lightweight chess web app for local-network games. It uses Python's standard
-library; no package installation is required.
+Commonroom is a lightweight, self-hosted team chat for people on the same
+network. It includes local accounts, teams, channels, direct messages, threaded
+replies, and persistent SQLite storage. The web interface is server-rendered:
+the main chat works with JavaScript disabled, while optional JavaScript checks
+for new messages every few seconds.
 
 ## Run on your Wi-Fi
 
-Start the server on the computer hosting the game:
+Use Python 3.10 or later; the application needs no third-party packages.
 
 ```sh
 python web.py
 ```
 
-The server prints its LAN address. Open that address in a browser on the host
-or another device on the same Wi-Fi. Allow the server's port (8000 by default)
-through the host firewall if another device cannot connect.
+Open the printed address on the host or another device on the same Wi-Fi.
+Allow inbound TCP port 8000 through the host firewall if other devices cannot
+connect. Create an account, create a team, then share its invite code with
+people you trust. Team members can create channels and start direct messages.
 
-Choose **Same device** for hot-seat play, or **Over Wi-Fi** to create a room.
-Share the room code and server address with the other player. The board scales
-to mobile screens and rotates to the online player's perspective.
+By default, the SQLite database is stored at `data/commonroom.sqlite3` next to
+the app. Set `CHAT_DB_PATH` to choose another location. Back up this database
+to preserve accounts and messages.
 
-Online rooms support clocks with increments, live chat, draw offers with
-accept/decline, and resignation. Room and chat data are held in memory and are
-lost when the server restarts. Keep the server on a trusted network; it is
-intended for LAN use, not direct exposure to the public internet.
+## Safety and privacy
 
-## Debugging and checks
+This app is intended for a trusted private network, not the public internet.
+HTTP traffic is unencrypted, so do not reuse an important password and do not
+expose the server directly to the internet. Passwords are stored as salted
+PBKDF2 hashes; messages and account data are stored in the SQLite database.
 
-Each HTTP request is logged with a request ID, client address, route, status,
-duration, and error category. The browser includes the request ID when showing
-an HTTP error so it can be matched to the server log. Authentication tokens and
-chat text are not logged.
-
-Run the built-in checks with:
+## Checks
 
 ```sh
-python -m py_compile chess.py web.py main.py rooms.py clocks.py lan.py
-python clocks.py
-python rooms.py
+python -m py_compile chat_store.py web.py lan.py
+python -m unittest discover -s tests -v
 node --check static/app.js
 ```
 
-See [`deploy/README.md`](deploy/README.md) for the K3s and Argo CD deployment
-setup.
+See [`deploy/README.md`](deploy/README.md) for K3s and Argo CD deployment.
