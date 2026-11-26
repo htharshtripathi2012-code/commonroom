@@ -9,6 +9,13 @@ function appendMessage(feed, message) {
   item.className = "message";
   item.dataset.messageId = String(message.id);
 
+  const avatar = document.createElement("span");
+  avatar.className = "message-avatar";
+  avatar.setAttribute("aria-hidden", "true");
+  avatar.textContent = message.author.slice(0, 1).toUpperCase();
+
+  const content = document.createElement("div");
+  content.className = "message-content";
   const meta = document.createElement("div");
   meta.className = "message-meta";
   const author = document.createElement("strong");
@@ -16,11 +23,10 @@ function appendMessage(feed, message) {
   const time = document.createElement("time");
   time.dateTime = message.created_at;
   time.textContent = message.created_at.replace("T", " ").slice(0, 16);
-  meta.append(author, time);
-
   const body = document.createElement("p");
   body.textContent = message.body;
-  item.append(meta, body);
+  meta.append(author, time);
+  content.append(meta, body);
 
   if (!feed.dataset.parent && feed.dataset.team) {
     const params = new URLSearchParams({ team: feed.dataset.team, thread: message.id });
@@ -29,8 +35,9 @@ function appendMessage(feed, message) {
     link.className = "thread-link";
     link.href = `/?${params}`;
     link.textContent = "Reply in thread";
-    item.append(link);
+    content.append(link);
   }
+  item.append(avatar, content);
   feed.append(item);
 }
 

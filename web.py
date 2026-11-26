@@ -75,7 +75,7 @@ def _render_auth_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101317">
+  <meta name="theme-color" content="#2d353b">
   <title>{_escape(title)} · Commonroom</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -113,8 +113,11 @@ def _render_message(
             f'<a class="thread-link" href="{_url("/", **context)}">Reply in thread</a>'
         )
     return f"""<li class="message" data-message-id="{message["id"]}">
-  <div class="message-meta"><strong>{_escape(message["author"])}</strong><time datetime="{timestamp}">{display_time}</time></div>
-  <p>{_escape(message["body"])}</p>{thread_link}
+  <span class="message-avatar" aria-hidden="true">{_escape(message["author"][:1].upper())}</span>
+  <div class="message-content">
+    <div class="message-meta"><strong>{_escape(message["author"])}</strong><time datetime="{timestamp}">{display_time}</time></div>
+    <p>{_escape(message["body"])}</p>{thread_link}
+  </div>
 </li>"""
 
 
@@ -234,18 +237,21 @@ def _render_workspace(
                 thread_root = None
 
     team_links = "".join(
-        f'<a class="team-link {"selected" if team and item["id"] == team["id"] else ""}" '
-        f'href="{_url("/", team=item["id"])}"><span class="team-avatar">{_escape(item["name"][:1].upper())}</span>'
-        f'<span>{_escape(item["name"])}</span></a>'
+        f'<a class="team-rail-link {"selected" if team and item["id"] == team["id"] else ""}" '
+        f'href="{_url("/", team=item["id"])}" title="{_escape(item["name"])}" aria-label="{_escape(item["name"])}"'
+        f'{" aria-current=\"page\"" if team and item["id"] == team["id"] else ""}>'
+        f'<span class="team-avatar" aria-hidden="true">{_escape(item["name"][:1].upper())}</span></a>'
         for item in teams
     )
     channel_links = "".join(
-        f'<a class="nav-link {"selected" if selected_channel and item["id"] == selected_channel["id"] else ""}" '
+        f'<a class="nav-link {"selected" if selected_channel and item["id"] == selected_channel["id"] else ""}"'
+        f'{" aria-current=\"page\"" if selected_channel and item["id"] == selected_channel["id"] else ""} '
         f'href="{_url("/", team=team["id"], channel=item["id"])}"><span>#</span>{_escape(item["name"])}</a>'
         for item in channels
     ) if team else ""
     dm_links = "".join(
-        f'<a class="nav-link {"selected" if selected_dm and item["id"] == selected_dm["id"] else ""}" '
+        f'<a class="nav-link {"selected" if selected_dm and item["id"] == selected_dm["id"] else ""}"'
+        f'{" aria-current=\"page\"" if selected_dm and item["id"] == selected_dm["id"] else ""} '
         f'href="{_url("/", team=team["id"], dm=item["id"])}"><span class="dm-dot">●</span>{_escape(item["username"])}</a>'
         for item in direct_messages
     ) if team else ""
@@ -273,7 +279,7 @@ def _render_workspace(
     error_notice = (
         f'<p class="notice error" role="alert">{_escape(error)}</p>' if error else ""
     )
-    team_forms = f"""<details class="sidebar-details">
+    team_forms = f"""<details class="sidebar-details" id="team-actions">
   <summary>New team</summary>
   <form action="/teams/create" method="post" class="stack-form">
     <input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
@@ -373,13 +379,16 @@ def _render_workspace(
             f'<span class="invite-note">Invite code <code>{_escape(team["invite_code"])}</code></span>'
         )
     workspace = f"""<div class="workspace">
+  <nav class="workspace-rail" aria-label="Workspaces">
+    <a class="rail-home" href="/" aria-label="Commonroom home"><span>c</span></a>
+    <div class="team-rail-list">{team_links or '<span class="rail-empty">—</span>'}</div>
+    <a class="rail-add" href="#team-actions" aria-label="Create or join a team">+</a>
+  </nav>
   <aside class="sidebar" id="workspace-navigation" aria-label="Workspace navigation">
-    <a class="wordmark" href="/"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</a>
+    <a class="workspace-title" href="/"><span>{_escape(team["name"]) if team else "Your workspaces"}</span><span aria-hidden="true">⌄</span></a>
     <div class="sidebar-scroll">
-      <div class="section-label">YOUR TEAMS</div>
-      <nav class="team-list" aria-label="Teams">{team_links or '<p class="sidebar-empty">No teams yet.</p>'}</nav>
-      {invite_banner}
       {team_forms}
+      {invite_banner}
       {f'<section class="nav-section"><div class="section-heading"><span>CHANNELS</span><span class="count">{len(channels)}</span></div><nav aria-label="Channels">{channel_links}</nav><details class="sidebar-details"><summary>Add channel</summary><form action="/channels/create" method="post" class="stack-form"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="team_id" value="{team["id"]}"><label for="channel-name">Channel name</label><input id="channel-name" name="name" maxlength="40" pattern="[a-zA-Z0-9_-]+" required placeholder="project-launch"><button class="small-button" type="submit">Create channel</button></form></details></section>' if team else ''}
       {f'<section class="nav-section"><div class="section-heading"><span>DIRECT MESSAGES</span><span class="count">{len(direct_messages)}</span></div>{dm_form}<nav aria-label="Direct messages">{dm_links or "<p class=sidebar-empty>No direct messages yet.</p>"}</nav></section>' if team else ''}
     </div>
@@ -397,7 +406,7 @@ def _render_workspace(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101317">
+  <meta name="theme-color" content="#2d353b">
   <title>{_escape(heading)} · Commonroom</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>

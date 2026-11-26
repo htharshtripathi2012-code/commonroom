@@ -4,15 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#2d353b">
-  <title>Commonroom · Static design preview</title>
+  <title>Commonroom · Chat layout preview</title>
   <link rel="stylesheet" href="style.css">
   <style>
     .demo-label {
       display: inline-block;
-      margin: 0 0 22px;
-      padding: 5px 8px;
-      border: 1px solid var(--accent);
-      color: var(--accent);
+      margin: 12px 0 0 22px;
+      color: var(--muted);
       font-size: 9px;
       font-weight: 700;
       letter-spacing: 1px;
@@ -23,23 +21,19 @@
 <body>
   <div class="app-frame">
     <div class="workspace">
+      <nav class="workspace-rail" aria-label="Workspaces">
+        <a class="rail-home" href="#" aria-label="Commonroom home"><span>c</span></a>
+        <div class="team-rail-list">
+          <a class="team-rail-link selected" href="#" aria-label="Studio North" title="Studio North"><span class="team-avatar">S</span></a>
+          <a class="team-rail-link" href="#" aria-label="Field notes" title="Field notes"><span class="team-avatar">F</span></a>
+          <a class="team-rail-link" href="#" aria-label="Weekend crew" title="Weekend crew"><span class="team-avatar">W</span></a>
+        </div>
+        <a class="rail-add" href="#" aria-label="Create or join a team">+</a>
+      </nav>
       <aside class="sidebar" id="workspace-navigation" aria-label="Workspace navigation">
-        <a class="wordmark" href="#"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</a>
+        <a class="workspace-title" href="#"><span>Studio North</span><span aria-hidden="true">⌄</span></a>
         <div class="sidebar-scroll">
-          <div class="section-label">Your teams</div>
-          <nav class="team-list" aria-label="Teams">
-            <a class="team-link selected" href="#"><span class="team-avatar">S</span><span>Studio North</span></a>
-            <a class="team-link" href="#"><span class="team-avatar">F</span><span>Field notes</span></a>
-          </nav>
-          <span class="invite-note">Invite code <code>7QK4-M2LP</code></span>
-          <details class="sidebar-details">
-            <summary>New team</summary>
-            <form class="stack-form"><label for="team-name">Team name</label><input id="team-name" placeholder="Design crew"><button class="small-button" type="button">Create team</button></form>
-          </details>
-          <details class="sidebar-details">
-            <summary>Join a team</summary>
-            <form class="stack-form"><label for="invite-code">Invite code</label><input id="invite-code"><button class="small-button" type="button">Join team</button></form>
-          </details>
+          <details class="sidebar-details"><summary>Invite people</summary><p class="invite-note">Invite code <code>7QK4-M2LP</code></p></details>
           <section class="nav-section">
             <div class="section-heading"><span>Channels</span><span class="count">04</span></div>
             <nav aria-label="Channels">
@@ -62,30 +56,30 @@
         <div class="user-card"><span class="user-avatar">A</span><div class="user-detail"><strong>alex.morgan</strong><span>On this network</span></div><button class="logout-button" type="button" aria-label="Log out">↗</button></div>
       </aside>
       <main class="main-pane">
-        <a class="mobile-nav-jump" href="#workspace-navigation"><span class="wordmark"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</span><span>Workspace menu ↓</span></a>
-        <p class="demo-label">Static design preview · sample content</p>
+        <a class="mobile-nav-jump" href="#workspace-navigation"><span class="wordmark"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</span><span>Channels ↓</span></a>
         <section class="conversation">
           <header class="conversation-heading">
-            <div><p class="eyebrow">Channel in Studio North</p><h1>#general</h1></div>
+            <div><p class="eyebrow">Channel</p><h1># general</h1></div>
             <div class="live-tools"><span class="live-indicator"><i></i><span>Live</span></span><a class="refresh-link" href="#">Refresh</a></div>
           </header>
           <div class="conversation-body has-thread">
             <div class="feed-column">
+              <p class="demo-label">Static preview · sample conversation</p>
               <ol class="message-feed">
-                <li class="message"><div class="message-meta"><strong>Maya Chen</strong><time>09:42</time></div><p>Morning, everyone. I put together a few directions for the wayfinding system. The warm paper stock is winning me over.</p><a class="thread-link" href="#">3 replies · View thread</a></li>
-                <li class="message"><div class="message-meta"><strong>Alex Morgan</strong><time>09:48</time></div><p>That material gives the whole thing a quieter confidence. The second direction feels like it belongs in the building.</p><a class="thread-link" href="#">Reply in thread</a></li>
-                <li class="message"><div class="message-meta"><strong>Luca Moretti</strong><time>10:03</time></div><p>Agree. I can bring a physical sample to the studio tomorrow. We should check how the ink sits against the darker paper in daylight.</p><a class="thread-link" href="#">Reply in thread</a></li>
-                <li class="message"><div class="message-meta"><strong>Maya Chen</strong><time>10:11</time></div><p>Perfect. I'll update the type scale this afternoon and share the print-ready version here.</p><a class="thread-link" href="#">Reply in thread</a></li>
+                <li class="message"><span class="message-avatar" aria-hidden="true">M</span><div class="message-content"><div class="message-meta"><strong>Maya Chen</strong><time>09:42</time></div><p>Morning, everyone. I put together a few directions for the wayfinding system. The warm paper stock is winning me over.</p><a class="thread-link" href="#">3 replies · View thread</a></div></li>
+                <li class="message"><span class="message-avatar" aria-hidden="true">A</span><div class="message-content"><div class="message-meta"><strong>Alex Morgan</strong><time>09:48</time></div><p>That material gives the whole thing a quieter confidence. The second direction feels like it belongs in the building.</p><a class="thread-link" href="#">Reply in thread</a></div></li>
+                <li class="message"><span class="message-avatar" aria-hidden="true">L</span><div class="message-content"><div class="message-meta"><strong>Luca Moretti</strong><time>10:03</time></div><p>Agree. I can bring a physical sample to the studio tomorrow. We should check how the ink sits against the darker paper in daylight.</p><a class="thread-link" href="#">Reply in thread</a></div></li>
+                <li class="message"><span class="message-avatar" aria-hidden="true">M</span><div class="message-content"><div class="message-meta"><strong>Maya Chen</strong><time>10:11</time></div><p>Perfect. I'll update the type scale this afternoon and share the print-ready version here.</p><a class="thread-link" href="#">Reply in thread</a></div></li>
               </ol>
               <form class="composer"><label class="sr-only" for="message-body">Write a message</label><textarea id="message-body" rows="2" placeholder="Message #general"></textarea><button class="send-button" type="button">Send <span aria-hidden="true">↗</span></button></form>
               <noscript><p class="noscript-note">Automatic updates need JavaScript. Sending works without JavaScript.</p></noscript>
             </div>
             <aside class="thread-panel">
               <div class="thread-heading"><div><p class="eyebrow">Thread / 03 replies</p><h2>Paper &amp; ink</h2></div><a class="icon-button close-thread" href="#" aria-label="Close thread">×</a></div>
-              <ol class="thread-root"><li class="message"><div class="message-meta"><strong>Maya Chen</strong><time>09:42</time></div><p>The warm paper stock is winning me over.</p></li></ol>
+              <ol class="thread-root"><li class="message"><span class="message-avatar" aria-hidden="true">M</span><div class="message-content"><div class="message-meta"><strong>Maya Chen</strong><time>09:42</time></div><p>The warm paper stock is winning me over.</p></div></li></ol>
               <ol class="message-feed">
-                <li class="message"><div class="message-meta"><strong>Alex Morgan</strong><time>09:46</time></div><p>It makes the signage feel considered, not precious.</p></li>
-                <li class="message"><div class="message-meta"><strong>Luca Moretti</strong><time>09:51</time></div><p>And the deep green ink stays readable in low light.</p></li>
+                <li class="message"><span class="message-avatar" aria-hidden="true">A</span><div class="message-content"><div class="message-meta"><strong>Alex Morgan</strong><time>09:46</time></div><p>It makes the signage feel considered, not precious.</p></div></li>
+                <li class="message"><span class="message-avatar" aria-hidden="true">L</span><div class="message-content"><div class="message-meta"><strong>Luca Moretti</strong><time>09:51</time></div><p>And the deep green ink stays readable in low light.</p></div></li>
               </ol>
               <form class="composer thread-composer"><label class="sr-only" for="thread-body">Reply to thread</label><textarea id="thread-body" rows="2" placeholder="Reply to thread…"></textarea><button class="send-button" type="button">Reply</button></form>
             </aside>

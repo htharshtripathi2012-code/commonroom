@@ -85,6 +85,7 @@ class ChatWebTests(unittest.TestCase):
         )
         _, _, page = self.request("/")
         self.assertIn("Friends", page)
+        self.assertIn('class="workspace-rail"', page)
         team_match = re.search(r'href="/\?team=(\d+)"', page)
         feed_match = re.search(
             r'<ol class="message-feed" data-kind="channel" data-team="(\d+)" data-id="(\d+)"',
@@ -122,6 +123,7 @@ class ChatWebTests(unittest.TestCase):
         _, _, page = self.request(return_to)
         self.assertIn("&lt;script&gt;not executable&lt;/script&gt;", page)
         self.assertNotIn("<script>not executable</script>", page)
+        self.assertIn('class="message-avatar"', page)
         root_id = re.search(r'data-message-id="(\d+)"', page).group(1)
 
         thread_url = f"/?team={team_id}&channel={channel_id}&thread={root_id}"
