@@ -84,9 +84,9 @@
         <div class="layout">
           <div class="board-wrap">
             <div class="board-coordinates" aria-hidden="true">
-              <div class="rank-labels"><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span></div>
+              <div id="rank-labels" class="rank-labels"><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span></div>
               <div id="board" class="board" role="grid" aria-label="Chess board"></div>
-              <div class="file-labels"><span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span></div>
+              <div id="file-labels" class="file-labels"><span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span></div>
             </div>
           </div>
 
@@ -104,6 +104,33 @@
             </div>
             <p id="status" class="status" role="status" aria-live="polite">Starting game…</p>
             <p id="room-banner" class="room-preview hidden" role="status"></p>
+            <section id="online-tools" class="online-tools hidden" aria-label="Online room controls">
+              <div class="room-tools">
+                <div class="room-heading">
+                  <h3>Room</h3>
+                  <span id="connection-status" class="connection-status" role="status">Connecting…</span>
+                </div>
+                <p id="room-state" class="room-state"></p>
+                <p id="draw-state" class="draw-state" role="status" aria-live="polite"></p>
+                <div class="room-actions">
+                  <button id="share-room" class="secondary-button" type="button">Share invite</button>
+                  <button id="draw-offer" class="secondary-button" type="button">Offer draw</button>
+                  <button id="draw-accept" class="secondary-button hidden" type="button">Accept draw</button>
+                  <button id="draw-decline" class="secondary-button hidden" type="button">Decline</button>
+                  <button id="resign" class="danger-button" type="button">Resign</button>
+                </div>
+                <p id="room-feedback" class="room-feedback" role="status" aria-live="polite"></p>
+              </div>
+              <section class="chat-card" aria-label="Room chat">
+                <h3>Room chat</h3>
+                <ol id="chat-messages" class="chat-messages" aria-live="polite" aria-relevant="additions"></ol>
+                <form id="chat-form" class="chat-form">
+                  <label class="sr-only" for="chat-input">Message</label>
+                  <input id="chat-input" type="text" maxlength="500" autocomplete="off" placeholder="Write a message…" required>
+                  <button class="primary-button" type="submit">Send</button>
+                </form>
+              </section>
+            </section>
             <div class="legend" aria-label="Move markers">
               <span><i class="legend-dot" aria-hidden="true"></i> Move</span>
               <span><i class="legend-ring" aria-hidden="true"></i> Capture</span>

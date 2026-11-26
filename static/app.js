@@ -1,4 +1,6 @@
 const boardElement = document.querySelector("#board");
+const rankLabels = document.querySelector("#rank-labels");
+const fileLabels = document.querySelector("#file-labels");
 const statusElement = document.querySelector("#status");
 const turnLabel = document.querySelector("#turn-label");
 const turnIndicator = document.querySelector("#turn-indicator");
@@ -20,7 +22,9 @@ let previewedRoom = null;
 let pollingTimer = null;
 let pollInFlight = false;
 let moveInFlight = false;
+let roomActionInFlight = false;
 let connectionFailed = false;
+let renderedChatIds = null;
 let audioContext = null;
 
 const soundPatterns = {
@@ -72,7 +76,9 @@ async function requestJson(path, options = {}) {
   const response = await fetch(path, options);
   const payload = await response.json();
   if (!response.ok) {
-    throw new Error(payload.error || "The local chess server returned an error.");
+    const message = payload.error || "The local chess server returned an error.";
+    const requestId = response.headers.get("X-Request-ID");
+    throw new Error(requestId ? `${message} (request ${requestId})` : message);
   }
   return payload;
 }
@@ -111,6 +117,10 @@ function defaultStatus(state) {
   if (state.checkmate) return `Checkmate. ${capitalize(state.winner)} wins.`;
   if (state.stalemate) return "Stalemate. The game is a draw.";
   if (state.timed_out) return `Time is up. ${capitalize(state.winner)} wins.`;
+  if (state.status === "draw") return "Draw agreed. The game is a draw.";
+  if (state.status === "resigned") {
+    return `${capitalize(state.winner)} wins by resignation.`;
+  }
   if (state.check) return `Check! ${capitalize(state.turn)} to move.`;
   return `${capitalize(state.turn)} to move.`;
 }
@@ -145,15 +155,50 @@ function updateClocks(state) {
 
 function render() {
   if (!gameState) return;
+  renderBoard();
+  turnLabel.textContent = gameState.waiting
+    ? "Waiting"
+    : gameState.game_over
+      ? "Game over"
+      : capitalize(gameState.turn);
+  turnIndicator.classList.toggle("black", gameState.turn === "black");
+  updateClocks(gameState);
+  renderRoomUi();
+}
+
+function isBlackPerspective() {
+  return activeMode === "online" && gameState?.player_color === "black";
+}
+
+function renderBoard() {
   const pieceAt = new Map(gameState.pieces.map((piece) => [piece.square, piece]));
   boardElement.replaceChildren();
 
-  for (let rank = 8; rank >= 1; rank -= 1) {
-    for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
-      const square = `${files[fileIndex]}${rank}`;
+  const blackPerspective = isBlackPerspective();
+  const ranks = blackPerspective ? [1, 2, 3, 4, 5, 6, 7, 8] : [8, 7, 6, 5, 4, 3, 2, 1];
+  const fileOrder = blackPerspective ? [...files].reverse() : [...files];
+  rankLabels.replaceChildren(...ranks.map((rank) => {
+    const label = document.createElement("span");
+    label.textContent = String(rank);
+    return label;
+  }));
+  fileLabels.replaceChildren(...fileOrder.map((file) => {
+    const label = document.createElement("span");
+    label.textContent = file;
+    return label;
+  }));
+  boardElement.setAttribute(
+    "aria-label",
+    `Chess board, ${blackPerspective ? "Black" : "White"}'s perspective`,
+  );
+
+  for (const rank of ranks) {
+    for (const file of fileOrder) {
+      const square = `${file}${rank}`;
       const piece = pieceAt.get(square);
       const button = document.createElement("button");
       button.type = "button";
+      const fileIndex = files.indexOf(file);
       button.className = `square ${(fileIndex + rank) % 2 === 0 ? "light" : "dark"}`;
       button.setAttribute("role", "gridcell");
       button.setAttribute(
@@ -179,27 +224,97 @@ function render() {
     }
   }
 
-  turnLabel.textContent = gameState.waiting
-    ? "Waiting"
-    : gameState.game_over
-      ? "Game over"
-      : capitalize(gameState.turn);
-  turnIndicator.classList.toggle("black", gameState.turn === "black");
-  updateClocks(gameState);
+}
+
+function renderRoomUi() {
+  const onlineTools = document.querySelector("#online-tools");
+  if (activeMode !== "online" || !gameState) {
+    onlineTools.classList.add("hidden");
+    document.querySelector("#room-banner").classList.add("hidden");
+    return;
+  }
+  onlineTools.classList.remove("hidden");
 
   const roomBanner = document.querySelector("#room-banner");
-  if (gameState.mode === "online" && gameState.room_code) {
+  if (gameState.room_code || activeRoomCode) {
     const address = window.location.origin;
     const role = gameState.player_color
       ? `You are ${capitalize(gameState.player_color)}. `
       : "";
     roomBanner.textContent = gameState.waiting
-      ? `Room ${gameState.room_code}. Share ${address} and the room code with the other player.`
-      : `${role}Room ${gameState.room_code}.`;
+      ? `Room ${gameState.room_code || activeRoomCode}. Share ${address} and the room code with the other player.`
+      : `${role}Room ${gameState.room_code || activeRoomCode}.`;
     roomBanner.classList.remove("hidden");
   } else {
     roomBanner.classList.add("hidden");
   }
+
+  const roomState = document.querySelector("#room-state");
+  roomState.textContent = typeof gameState.status === "string"
+    ? `Room status: ${gameState.status}`
+    : "";
+  const drawOffer = gameState.draw_offer_by;
+  const hasOffer = drawOffer === "white" || drawOffer === "black";
+  const ownOffer = hasOffer && drawOffer === gameState.player_color;
+  const liveGame = !gameState.waiting && !gameState.game_over;
+  document.querySelector("#draw-offer").classList.toggle("hidden", hasOffer);
+  document.querySelector("#draw-accept").classList.toggle("hidden", !hasOffer || ownOffer);
+  document.querySelector("#draw-decline").classList.toggle("hidden", !hasOffer || ownOffer);
+  document.querySelector("#draw-offer").disabled =
+    !liveGame || roomActionInFlight;
+  document.querySelector("#draw-accept").disabled =
+    !liveGame || roomActionInFlight;
+  document.querySelector("#draw-decline").disabled =
+    !liveGame || roomActionInFlight;
+  document.querySelector("#resign").disabled =
+    !liveGame || roomActionInFlight;
+  document.querySelector("#share-room").disabled = roomActionInFlight;
+  document.querySelector("#chat-input").disabled = !liveGame || roomActionInFlight;
+  document.querySelector("#chat-form button").disabled =
+    !liveGame || roomActionInFlight;
+  const drawState = document.querySelector("#draw-state");
+  if (hasOffer) {
+    drawState.textContent = ownOffer
+      ? "Your draw offer is awaiting a response."
+      : `${capitalize(drawOffer)} offered a draw.`;
+  } else {
+    drawState.textContent = "";
+  }
+  renderChat(gameState.chat_messages);
+}
+
+function renderChat(messages) {
+  const list = document.querySelector("#chat-messages");
+  const entries = Array.isArray(messages) ? messages : [];
+  const ids = entries.map((message) => String(message.id)).join("|");
+  if (ids === renderedChatIds) return;
+  renderedChatIds = ids;
+  const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 32;
+  list.replaceChildren();
+  for (const message of entries) {
+    const item = document.createElement("li");
+    const color = message.color === "black" ? "black" : "white";
+    item.className = `chat-message ${color}`;
+    const author = document.createElement("strong");
+    author.textContent = capitalize(color);
+    const text = document.createElement("p");
+    text.textContent = typeof message.text === "string" ? message.text : "";
+    item.append(author, text);
+    list.append(item);
+  }
+  if (wasAtBottom || entries.length === 1) list.scrollTop = list.scrollHeight;
+}
+
+function showRoomFeedback(message, isError = false) {
+  const feedback = document.querySelector("#room-feedback");
+  feedback.textContent = message;
+  feedback.classList.toggle("error", isError);
+}
+
+function setConnectionStatus(message, isError = false) {
+  const connection = document.querySelector("#connection-status");
+  connection.textContent = message;
+  connection.classList.toggle("disconnected", isError);
 }
 
 function activeStatePath(selected = null) {
@@ -221,6 +336,9 @@ async function installGame(state, mode, roomCode = null, token = null) {
   selectedSquare = null;
   legalMoves.clear();
   pendingPromotionMove = null;
+  renderedChatIds = null;
+  roomActionInFlight = false;
+  connectionFailed = false;
   sessionStorage.setItem("chess-mode", mode);
   if (mode === "online") {
     sessionStorage.setItem("chess-room", roomCode);
@@ -234,6 +352,8 @@ async function installGame(state, mode, roomCode = null, token = null) {
   document.querySelector("#new-game").classList.remove("hidden");
   render();
   showStatus(defaultStatus(gameState));
+  setConnectionStatus(mode === "online" ? "Connected" : "");
+  showRoomFeedback("");
   startPolling();
 }
 
@@ -243,7 +363,7 @@ function startPolling() {
 }
 
 async function pollGameState() {
-  if (!activeMode || pollInFlight || moveInFlight) return;
+  if (!activeMode || pollInFlight || moveInFlight || roomActionInFlight) return;
   pollInFlight = true;
   try {
     const previousSignature = gameState ? boardSignature(gameState) : "";
@@ -253,6 +373,7 @@ async function pollGameState() {
     const restoredConnection = connectionFailed;
     connectionFailed = false;
     gameState = freshState;
+    if (activeMode === "online") setConnectionStatus("Connected");
     if (previousSignature !== boardSignature(freshState)) {
       selectedSquare = null;
       legalMoves.clear();
@@ -274,8 +395,10 @@ async function pollGameState() {
       if (freshState.game_over) showStatus(defaultStatus(freshState));
       if (restoredConnection) showStatus(defaultStatus(freshState));
     }
+    renderRoomUi();
   } catch (error) {
     connectionFailed = true;
+    if (activeMode === "online") setConnectionStatus("Connection lost", true);
     showStatus(`Connection lost: ${error.message}`, true);
   } finally {
     pollInFlight = false;
@@ -353,6 +476,128 @@ function formatTimeControl(clock) {
   return `${base} + ${clock.increment_seconds} sec per move`;
 }
 
+function roomRequestPayload(extra = {}) {
+  return {
+    room_code: activeRoomCode,
+    player_token: playerToken,
+    ...extra,
+  };
+}
+
+async function performRoomAction(action) {
+  if (roomActionInFlight || activeMode !== "online") return;
+  roomActionInFlight = true;
+  renderRoomUi();
+  try {
+    const response = await requestJson(
+      "/api/rooms/draw",
+      jsonOptions(roomRequestPayload({ action })),
+    );
+    gameState = response.state;
+    selectedSquare = null;
+    legalMoves.clear();
+    render();
+    showStatus(defaultStatus(gameState));
+    const messages = {
+      offer: "Draw offer sent.",
+      accept: "Draw accepted.",
+      decline: "Draw offer declined.",
+    };
+    showRoomFeedback(messages[action]);
+  } catch (error) {
+    showRoomFeedback(error.message, true);
+  } finally {
+    roomActionInFlight = false;
+    renderRoomUi();
+  }
+}
+
+async function resign() {
+  if (roomActionInFlight || activeMode !== "online") return;
+  if (!window.confirm("Resign this game?")) return;
+  roomActionInFlight = true;
+  renderRoomUi();
+  try {
+    const response = await requestJson(
+      "/api/rooms/resign",
+      jsonOptions(roomRequestPayload()),
+    );
+    gameState = response.state;
+    selectedSquare = null;
+    legalMoves.clear();
+    render();
+    showStatus(defaultStatus(gameState));
+    showRoomFeedback("You resigned.");
+  } catch (error) {
+    showRoomFeedback(error.message, true);
+  } finally {
+    roomActionInFlight = false;
+    renderRoomUi();
+  }
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  if (
+    roomActionInFlight
+    || activeMode !== "online"
+    || gameState?.waiting
+    || gameState?.game_over
+  ) return;
+  const input = document.querySelector("#chat-input");
+  const message = input.value.trim();
+  if (!message) return;
+  roomActionInFlight = true;
+  renderRoomUi();
+  try {
+    const response = await requestJson(
+      "/api/rooms/chat",
+      jsonOptions(roomRequestPayload({ message })),
+    );
+    gameState = response.state;
+    input.value = "";
+    renderRoomUi();
+    showRoomFeedback("");
+  } catch (error) {
+    showRoomFeedback(error.message, true);
+  } finally {
+    roomActionInFlight = false;
+    renderRoomUi();
+  }
+}
+
+async function shareRoomInvite() {
+  if (!activeRoomCode) return;
+  const text = `Join my chess game at ${window.location.origin} with room code ${activeRoomCode}.`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "Chess room invite", text });
+      showRoomFeedback("Invite shared.");
+      return;
+    } catch (error) {
+      if (error.name === "AbortError") return;
+    }
+  }
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const copyField = document.createElement("textarea");
+      copyField.value = text;
+      copyField.setAttribute("readonly", "");
+      copyField.className = "copy-field";
+      document.body.append(copyField);
+      copyField.select();
+      const copied = document.execCommand("copy");
+      copyField.remove();
+      if (!copied) throw new Error("Copy is not available in this browser.");
+    }
+    showRoomFeedback("Invite copied. Share it with the other player.");
+  } catch (error) {
+    showRoomFeedback(`Could not copy invite: ${error.message}`, true);
+  }
+}
+
 async function joinRoom() {
   clearLobbyError();
   if (!previewedRoom) {
@@ -386,7 +631,7 @@ async function loadState(selected = null) {
 
 async function onSquareClick(square) {
   unlockAudio();
-  if (!gameState || gameState.waiting || gameState.game_over || moveInFlight) return;
+  if (!gameState || gameState.waiting || gameState.game_over || moveInFlight || roomActionInFlight) return;
   if (
     activeMode === "online"
     && gameState.player_color !== gameState.turn
@@ -508,6 +753,12 @@ document.querySelector("#start-hotseat").addEventListener("click", startHotseat)
 document.querySelector("#create-room").addEventListener("click", createRoom);
 document.querySelector("#preview-room").addEventListener("click", previewRoom);
 document.querySelector("#join-room").addEventListener("click", joinRoom);
+document.querySelector("#share-room").addEventListener("click", shareRoomInvite);
+document.querySelector("#draw-offer").addEventListener("click", () => performRoomAction("offer"));
+document.querySelector("#draw-accept").addEventListener("click", () => performRoomAction("accept"));
+document.querySelector("#draw-decline").addEventListener("click", () => performRoomAction("decline"));
+document.querySelector("#resign").addEventListener("click", resign);
+document.querySelector("#chat-form").addEventListener("submit", sendChat);
 document.querySelector("#join-code").addEventListener("input", () => {
   previewedRoom = null;
   document.querySelector("#room-preview").classList.add("hidden");

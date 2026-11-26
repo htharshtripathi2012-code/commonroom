@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hmac
 import secrets
 from threading import RLock
@@ -12,6 +13,8 @@ from chess import Game, board_creation
 
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _CODE_CHARACTERS = frozenset(_CODE_ALPHABET)
+_CHAT_HISTORY_LIMIT = 100
+_CHAT_MESSAGE_MAX_LENGTH = 500
 
 
 class RoomError(Exception):
@@ -68,6 +71,11 @@ class Room:
 class _RoomState:
     room: Room
     tokens: dict[str, str]
+    draw_offer_by: str | None = None
+    finished_status: str | None = None
+    winner: str | None = None
+    chat_messages: list[dict] = field(default_factory=list)
+    next_chat_id: int = 1
 
 
 class RoomManager:
@@ -136,6 +144,7 @@ class RoomManager:
         with self._lock:
             state = self._get_state(normalized)
             color = self._authenticate(state, player_token)
+            self._ensure_active(state)
             if state.room.game.turn != color:
                 raise NotPlayersTurnError(
                     f"It is {state.room.game.turn}'s turn, not {color}'s"
@@ -155,6 +164,7 @@ class RoomManager:
         with self._lock:
             state = self._get_state(normalized)
             color = self._authenticate(state, player_token)
+            self._ensure_active(state)
             if state.room.game.turn != color:
                 raise NotPlayersTurnError(
                     f"It is {state.room.game.turn}'s turn, not {color}'s"
@@ -162,6 +172,123 @@ class RoomManager:
             return state.room.game.play_move(
                 from_position, to_position, promotion=promotion
             )
+
+    def protocol_state(self, code: str) -> dict:
+        """Return a consistent snapshot of room protocol state."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            state = self._get_state(normalized)
+            if not state.room.started:
+                status = "waiting"
+            elif state.finished_status is not None:
+                status = state.finished_status
+            elif state.room.game.is_checkmate():
+                status = "checkmate"
+            elif state.room.game.is_stalemate():
+                status = "stalemate"
+            else:
+                status = "active"
+            return {
+                "status": status,
+                "winner": state.winner,
+                "draw_offer_by": state.draw_offer_by,
+                "chat_messages": list(state.chat_messages),
+            }
+
+    def authenticate_player(self, code: str, player_token: str) -> str:
+        """Authenticate a token and return its color."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            state = self._get_state(normalized)
+            return self._authenticate(state, player_token)
+
+    def submit_chat(
+        self, code: str, player_token: str, message: str
+    ) -> dict:
+        """Add a validated, bounded chat message to a started active room."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            state = self._get_state(normalized)
+            color = self._authenticate(state, player_token)
+            self._ensure_active(state)
+            if not isinstance(message, str):
+                raise ValueError("Message must be a string")
+            text = message.strip()
+            if not text:
+                raise ValueError("Message cannot be empty")
+            if len(text) > _CHAT_MESSAGE_MAX_LENGTH:
+                raise ValueError(
+                    f"Message cannot exceed {_CHAT_MESSAGE_MAX_LENGTH} characters"
+                )
+            chat_message = {
+                "id": state.next_chat_id,
+                "color": color,
+                "text": text,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            state.next_chat_id += 1
+            state.chat_messages.append(chat_message)
+            del state.chat_messages[:-_CHAT_HISTORY_LIMIT]
+            return dict(chat_message)
+
+    def handle_draw_action(
+        self, code: str, player_token: str, action: str
+    ) -> None:
+        """Offer, accept, or decline a draw in a started active room."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            state = self._get_state(normalized)
+            color = self._authenticate(state, player_token)
+            self._ensure_active(state)
+            if action not in ("offer", "accept", "decline"):
+                raise ValueError("Draw action must be offer, accept, or decline")
+            if action == "offer":
+                if state.draw_offer_by is not None:
+                    raise ValueError("A draw offer is already pending")
+                state.draw_offer_by = color
+                return
+            if state.draw_offer_by is None:
+                raise ValueError("There is no pending draw offer")
+            if state.draw_offer_by == color:
+                raise ValueError("Only the opponent can respond to a draw offer")
+            if action == "accept":
+                state.finished_status = "draw"
+                state.winner = None
+            state.draw_offer_by = None
+
+    def resign(self, code: str, player_token: str) -> None:
+        """End an active room by resignation and award the game to the opponent."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            state = self._get_state(normalized)
+            color = self._authenticate(state, player_token)
+            self._ensure_active(state)
+            state.finished_status = "resigned"
+            state.winner = "black" if color == "white" else "white"
+            state.draw_offer_by = None
+
+    def dismiss_draw_offer(
+        self, code: str, moving_color: str, game_over: bool = False
+    ) -> None:
+        """Dismiss a pending offer when its opponent makes a move."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            state = self._get_state(normalized)
+            if state.draw_offer_by is not None and (
+                game_over or state.draw_offer_by != moving_color
+            ):
+                state.draw_offer_by = None
+
+    @staticmethod
+    def _ensure_active(state: _RoomState) -> None:
+        if not state.room.started:
+            raise ValueError("Waiting for the other player to join")
+        if (
+            state.finished_status is not None
+            or state.room.game.is_checkmate()
+            or state.room.game.is_stalemate()
+        ):
+            raise ValueError("The game is over")
 
     def _get_state(self, normalized_code: str) -> _RoomState:
         state = self._rooms.get(normalized_code)
@@ -235,5 +362,73 @@ if __name__ == "__main__":
             self.manager.submit_move(self.room.code, self.white_token, "e2", "e4")
             self.manager.submit_move(self.room.code, black_token, "e7", "e5")
             self.assertEqual(self.room.game.turn, "white")
+
+        def test_chat_validation_and_history_limit(self):
+            self.manager.join_room(self.room.code)
+            with self.assertRaises(InvalidPlayerTokenError):
+                self.manager.submit_chat(self.room.code, "wrong-token", "hello")
+            with self.assertRaises(ValueError):
+                self.manager.submit_chat(self.room.code, self.white_token, "  ")
+            with self.assertRaises(ValueError):
+                self.manager.submit_chat(self.room.code, self.white_token, "x" * 501)
+
+            for index in range(101):
+                self.manager.submit_chat(
+                    self.room.code, self.white_token, f"message {index}"
+                )
+            messages = self.manager.protocol_state(self.room.code)["chat_messages"]
+            self.assertEqual(len(messages), 100)
+            self.assertEqual(messages[0]["text"], "message 1")
+            self.assertEqual(messages[-1]["text"], "message 100")
+
+        def test_draw_offer_requires_opponent_and_acceptance_finishes_game(self):
+            _, black_token = self.manager.join_room(self.room.code)
+            self.manager.handle_draw_action(self.room.code, self.white_token, "offer")
+            self.assertEqual(
+                self.manager.protocol_state(self.room.code)["draw_offer_by"], "white"
+            )
+            with self.assertRaises(ValueError):
+                self.manager.handle_draw_action(
+                    self.room.code, self.white_token, "accept"
+                )
+            self.manager.handle_draw_action(
+                self.room.code, black_token, "accept"
+            )
+            state = self.manager.protocol_state(self.room.code)
+            self.assertEqual(state["status"], "draw")
+            self.assertIsNone(state["winner"])
+            with self.assertRaises(ValueError):
+                self.manager.handle_draw_action(
+                    self.room.code, self.white_token, "offer"
+                )
+
+        def test_opponents_move_dismisses_draw_offer(self):
+            _, black_token = self.manager.join_room(self.room.code)
+            self.manager.handle_draw_action(self.room.code, self.white_token, "offer")
+            white_move = self.manager.submit_move(
+                self.room.code, self.white_token, "e2", "e4"
+            )
+            self.manager.dismiss_draw_offer(self.room.code, white_move.color)
+            self.assertEqual(
+                self.manager.protocol_state(self.room.code)["draw_offer_by"], "white"
+            )
+            black_move = self.manager.submit_move(
+                self.room.code, black_token, "e7", "e5"
+            )
+            self.manager.dismiss_draw_offer(self.room.code, black_move.color)
+            self.assertIsNone(
+                self.manager.protocol_state(self.room.code)["draw_offer_by"]
+            )
+
+        def test_resignation_awards_opponent_and_prevents_moves(self):
+            _, black_token = self.manager.join_room(self.room.code)
+            self.manager.resign(self.room.code, black_token)
+            state = self.manager.protocol_state(self.room.code)
+            self.assertEqual(state["status"], "resigned")
+            self.assertEqual(state["winner"], "white")
+            with self.assertRaises(ValueError):
+                self.manager.submit_move(
+                    self.room.code, self.white_token, "e2", "e4"
+                )
 
     unittest.main()
