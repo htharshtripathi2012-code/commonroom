@@ -294,14 +294,15 @@ def _render_workspace(
 
     if team is None:
         content = f"""<section class="welcome-card">
-  <span class="welcome-icon" aria-hidden="true">✦</span>
-  <p class="eyebrow">YOUR SPACE, YOUR PEOPLE</p>
-  <h1>Start a conversation.</h1>
-  <p>Create a team for your group or join an existing one with an invite code. Channels, DMs, and threaded replies are ready when you are.</p>
-  <div class="welcome-grid">
-    <div><h2>Create a team</h2><p>Name a workspace and invite your people with its code.</p></div>
-    <div><h2>Join a team</h2><p>Enter a code shared by someone on your network.</p></div>
+  <div class="welcome-main">
+    <p class="eyebrow">COMMONROOM / PRIVATE NETWORK</p>
+    <h1>Make room<br><em>for conversation.</em></h1>
+    <p>A shared space for your people. Start a team or join one with an invite code, then talk in channels, direct messages, and threads.</p>
   </div>
+  <ol class="welcome-steps">
+    <li><span>01</span><strong>Create a team</strong><small>Open “New team” in the sidebar and invite people with its code.</small></li>
+    <li><span>02</span><strong>Join your people</strong><small>Open “Join a team” and enter a code shared with you.</small></li>
+  </ol>
 </section>"""
     else:
         if conversation_id is not None:
@@ -372,7 +373,7 @@ def _render_workspace(
             f'<span class="invite-note">Invite code <code>{_escape(team["invite_code"])}</code></span>'
         )
     workspace = f"""<div class="workspace">
-  <aside class="sidebar" aria-label="Workspace navigation">
+  <aside class="sidebar" id="workspace-navigation" aria-label="Workspace navigation">
     <a class="wordmark" href="/"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</a>
     <div class="sidebar-scroll">
       <div class="section-label">YOUR TEAMS</div>
@@ -386,7 +387,10 @@ def _render_workspace(
       <form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="logout-button" type="submit" aria-label="Log out">↗</button></form>
     </div>
   </aside>
-  <main class="main-pane">{error_notice}{content}</main>
+  <main class="main-pane">
+    <a class="mobile-nav-jump" href="#workspace-navigation"><span class="wordmark"><span class="brand-glyph" aria-hidden="true">●</span> commonroom</span><span>Workspace menu ↓</span></a>
+    {error_notice}{content}
+  </main>
 </div>"""
     return f"""<!doctype html>
 <html lang="en">
