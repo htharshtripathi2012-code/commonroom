@@ -1,5 +1,7 @@
 FROM python:3.13-slim
 
+LABEL org.opencontainers.image.source="https://github.com/htharshtripathi2012-code/chess"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     CHESS_BIND_HOST=0.0.0.0 \
