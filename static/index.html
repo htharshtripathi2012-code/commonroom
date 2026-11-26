@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f2ec">
+    <title>Chess</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">♞</span>
+          <h1>Chess</h1>
+        </div>
+        <button id="new-game" class="new-game hidden" type="button">New game</button>
+      </header>
+
+      <section id="lobby" class="lobby" aria-label="Start a chess game">
+        <h2>How do you want to play?</h2>
+        <p class="lobby-intro">Pick a game. Then move the pieces.</p>
+        <div class="mode-grid">
+          <article class="setup-card">
+            <span class="setup-icon" aria-hidden="true">♟♙</span>
+            <h3>Same device</h3>
+            <p>Take turns on this screen.</p>
+            <label for="local-minutes">Time per player</label>
+            <div class="clock-choice">
+              <select id="local-minutes" aria-label="Minutes per player">
+                <option value="60">1 minute</option>
+                <option value="180">3 minutes</option>
+                <option value="300" selected>5 minutes</option>
+                <option value="600">10 minutes</option>
+                <option value="900">15 minutes</option>
+              </select>
+              <select id="local-increment" aria-label="Seconds added per move">
+                <option value="0" selected>+ 0 sec</option>
+                <option value="1">+ 1 sec</option>
+                <option value="2">+ 2 sec</option>
+                <option value="5">+ 5 sec</option>
+              </select>
+            </div>
+            <button id="start-hotseat" class="primary-button" type="button">Start game</button>
+          </article>
+
+          <article class="setup-card">
+            <span class="setup-icon" aria-hidden="true">⌂</span>
+            <h3>Over Wi-Fi</h3>
+            <p>Play with someone on this network.</p>
+            <label for="online-minutes">Room clock</label>
+            <div class="clock-choice">
+              <select id="online-minutes" aria-label="Minutes per player">
+                <option value="60">1 minute</option>
+                <option value="180">3 minutes</option>
+                <option value="300" selected>5 minutes</option>
+                <option value="600">10 minutes</option>
+                <option value="900">15 minutes</option>
+              </select>
+              <select id="online-increment" aria-label="Seconds added per move">
+                <option value="0" selected>+ 0 sec</option>
+                <option value="1">+ 1 sec</option>
+                <option value="2">+ 2 sec</option>
+                <option value="5">+ 5 sec</option>
+              </select>
+            </div>
+            <button id="create-room" class="primary-button" type="button">Create a room</button>
+            <div class="join-room">
+              <label for="join-code">Or join with a room code</label>
+              <div class="join-controls">
+                <input id="join-code" maxlength="10" autocomplete="off" placeholder="ROOM CODE">
+                <button id="preview-room" class="secondary-button" type="button">Check</button>
+              </div>
+              <p id="room-preview" class="room-preview hidden" role="status"></p>
+              <button id="join-room" class="secondary-button hidden" type="button">Join this game</button>
+            </div>
+          </article>
+        </div>
+        <p id="lobby-error" class="status error hidden" role="alert"></p>
+      </section>
+
+      <section id="game-screen" class="hidden" aria-label="Chess game">
+        <div class="layout">
+          <div class="board-wrap">
+            <div class="board-coordinates" aria-hidden="true">
+              <div class="rank-labels"><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span></div>
+              <div id="board" class="board" role="grid" aria-label="Chess board"></div>
+              <div class="file-labels"><span>a</span><span>b</span><span>c</span><span>d</span><span>e</span><span>f</span><span>g</span><span>h</span></div>
+            </div>
+          </div>
+
+          <aside class="game-panel" aria-label="Game status">
+            <div class="clock-card">
+              <div class="clock-entry"><span class="turn-indicator"></span><span>White</span><strong id="white-clock">5:00</strong></div>
+              <div class="clock-entry"><span class="turn-indicator black"></span><span>Black</span><strong id="black-clock">5:00</strong></div>
+            </div>
+            <div class="turn-card">
+              <span id="turn-indicator" class="turn-indicator" aria-hidden="true"></span>
+              <div>
+                <p class="eyebrow">TO MOVE</p>
+                <h2 id="turn-label">Loading…</h2>
+              </div>
+            </div>
+            <p id="status" class="status" role="status" aria-live="polite">Starting game…</p>
+            <p id="room-banner" class="room-preview hidden" role="status"></p>
+            <div class="legend" aria-label="Move markers">
+              <span><i class="legend-dot" aria-hidden="true"></i> Move</span>
+              <span><i class="legend-ring" aria-hidden="true"></i> Capture</span>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <div id="promotion" class="promotion hidden" role="dialog" aria-modal="true" aria-labelledby="promotion-title">
+        <p id="promotion-title">Promote pawn</p>
+        <div class="promotion-options">
+          <button type="button" data-promotion="queen" aria-label="Promote to queen">♕</button>
+          <button type="button" data-promotion="rook" aria-label="Promote to rook">♖</button>
+          <button type="button" data-promotion="bishop" aria-label="Promote to bishop">♗</button>
+          <button type="button" data-promotion="knight" aria-label="Promote to knight">♘</button>
+        </div>
+        <button id="cancel-promotion" class="cancel" type="button">Cancel</button>
+      </div>
+    </main>
+  </body>
+</html>

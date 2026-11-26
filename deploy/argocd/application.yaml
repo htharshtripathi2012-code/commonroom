@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chess
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/htharshtripathi2012-code/chess.git
+    targetRevision: main
+    path: deploy/k8s/overlays/k3s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: chess
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
