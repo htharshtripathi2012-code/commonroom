@@ -1,4 +1,4 @@
-name: Build and deploy chess
+name: Build and publish chess
 
 on:
   push:
@@ -9,35 +9,20 @@ concurrency:
   group: chess-main
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  packages: write
-
 env:
   IMAGE_NAME: ghcr.io/htharshtripathi2012-code/chess
 
 jobs:
-  build-and-deploy:
+  build-and-publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check whether this revision is current
-        id: freshness
-        run: |
-          git fetch origin main
-          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
-            echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "A newer main commit exists; this revision will not be published."
-          else
-            echo "current=true" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Run application checks
-        if: steps.freshness.outputs.current == 'true'
         run: |
           python -m py_compile chess.py web.py main.py rooms.py clocks.py lan.py
           python clocks.py
@@ -45,15 +30,12 @@ jobs:
           node --check static/app.js
 
       - name: Set up QEMU
-        if: steps.freshness.outputs.current == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        if: steps.freshness.outputs.current == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        if: steps.freshness.outputs.current == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -61,43 +43,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish image
-        if: steps.freshness.outputs.current == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ env.IMAGE_NAME }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/htharshtripathi2012-code/chess
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Update the Argo CD image tag
-        if: steps.freshness.outputs.current == 'true'
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          git fetch origin main
-          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
-            echo "A newer main commit exists; leaving its deployment tag unchanged."
-            exit 0
-          fi
-
-          git checkout -B main origin/main
-          sed -i -E "s/^    newTag: .*/    newTag: ${IMAGE_TAG}/" \
-            deploy/k8s/overlays/k3s/kustomization.yaml
-          git add deploy/k8s/overlays/k3s/kustomization.yaml
-          if git diff --cached --quiet; then
-            echo "The deployment already references this image."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Deploy image ${IMAGE_TAG} [skip ci]"
-          git pull --rebase origin main
-          git push origin main
