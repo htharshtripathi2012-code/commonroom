@@ -61,7 +61,12 @@ class ChatStore:
                     username_key TEXT NOT NULL UNIQUE,
                     salt BLOB NOT NULL,
                     password_hash BLOB NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'member'
+                        CHECK(role IN ('member', 'admin')),
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_ip TEXT,
+                    last_seen TEXT
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
                     token_hash TEXT PRIMARY KEY,
@@ -122,6 +127,19 @@ class ChatStore:
                     ON messages(direct_message_id, parent_id, id);
                 """
             )
+            user_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(users)")
+            }
+            for name, declaration in (
+                ("role", "TEXT NOT NULL DEFAULT 'member'"),
+                ("active", "INTEGER NOT NULL DEFAULT 1"),
+                ("last_ip", "TEXT"),
+                ("last_seen", "TEXT"),
+            ):
+                if name not in user_columns:
+                    connection.execute(
+                        f"ALTER TABLE users ADD COLUMN {name} {declaration}"
+                    )
             connection.commit()
 
     @staticmethod
@@ -131,6 +149,7 @@ class ChatStore:
         return {
             "id": row["id"],
             "username": row["username"],
+            "role": row["role"] if "role" in row.keys() else "member",
         }
 
     def create_user(self, username: str, password: str) -> dict:
@@ -162,7 +181,7 @@ class ChatStore:
                         _now(),
                     ),
                 )
-                return {"id": cursor.lastrowid, "username": username}
+                return {"id": cursor.lastrowid, "username": username, "role": "member"}
         except sqlite3.IntegrityError as error:
             raise ChatError("That username is already taken.") from error
 
@@ -172,12 +191,12 @@ class ChatStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, username, salt, password_hash
+                SELECT id, username, salt, password_hash, role, active
                 FROM users WHERE username_key = ?
                 """,
                 (username.casefold(),),
             ).fetchone()
-        if row is None:
+        if row is None or not row["active"]:
             hashlib.pbkdf2_hmac(
                 "sha256", password.encode("utf-8"), b"lan-chat-dummy-salt", _PASSWORD_ITERATIONS
             )
@@ -188,6 +207,33 @@ class ChatStore:
         if not hmac.compare_digest(candidate, row["password_hash"]):
             return None
         return self._user(row)
+
+    def configure_admin(self, username: str, password: str) -> dict:
+        """Create the configured administrator or promote its existing account."""
+        if not isinstance(username, str) or not _USERNAME_PATTERN.fullmatch(username):
+            raise ChatError("Use 3–30 letters, numbers, dots, dashes, or underscores.")
+        if (
+            not isinstance(password, str)
+            or len(password) < 10
+            or len(password) > 128
+        ):
+            raise ChatError("Admin password must be between 10 and 128 characters.")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id, username, role FROM users WHERE username_key = ?",
+                (username.casefold(),),
+            ).fetchone()
+            if row:
+                connection.execute(
+                    "UPDATE users SET role = 'admin' WHERE id = ?", (row["id"],)
+                )
+                return {"id": row["id"], "username": row["username"], "role": "admin"}
+        user = self.create_user(username, password)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET role = 'admin' WHERE id = ?", (user["id"],)
+            )
+        return {**user, "role": "admin"}
 
     def create_session(self, user_id: int) -> tuple[str, str]:
         token = secrets.token_urlsafe(32)
@@ -218,7 +264,8 @@ class ChatStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT users.id, users.username, sessions.csrf_token, sessions.expires_at
+                SELECT users.id, users.username, users.role, users.active,
+                    sessions.csrf_token, sessions.expires_at
                 FROM sessions JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = ?
                 """,
@@ -226,15 +273,245 @@ class ChatStore:
             ).fetchone()
             if row is None:
                 return None
-            if row["expires_at"] <= _now():
+            if row["expires_at"] <= _now() or not row["active"]:
                 connection.execute(
                     "DELETE FROM sessions WHERE token_hash = ?", (token_hash,)
                 )
                 return None
             return {
-                "user": {"id": row["id"], "username": row["username"]},
+                "user": {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "role": row["role"],
+                },
                 "csrf_token": row["csrf_token"],
             }
+
+    @staticmethod
+    def _require_admin(connection: sqlite3.Connection, admin_id: int) -> None:
+        row = connection.execute(
+            "SELECT role, active FROM users WHERE id = ?", (admin_id,)
+        ).fetchone()
+        if row is None or row["role"] != "admin" or not row["active"]:
+            raise ChatError("Administrator access is required.")
+
+    @staticmethod
+    def _protect_last_admin(
+        connection: sqlite3.Connection, target_id: int
+    ) -> None:
+        target = connection.execute(
+            "SELECT role, active FROM users WHERE id = ?", (target_id,)
+        ).fetchone()
+        if target is None:
+            raise ChatError("Account not found.")
+        if target["role"] == "admin" and target["active"]:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1"
+            ).fetchone()[0]
+            if count <= 1:
+                raise ChatError("Keep at least one active administrator.")
+
+    def record_activity(self, user_id: int, client_ip: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET last_ip = ?, last_seen = ? WHERE id = ?",
+                (client_ip, _now(), user_id),
+            )
+
+    def admin_list_users(self, admin_id: int, search: str = "") -> list[dict]:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            needle = f"%{search.strip()}%"
+            rows = connection.execute(
+                """
+                SELECT id, username, role, active, last_ip, last_seen, created_at
+                FROM users
+                WHERE username LIKE ? COLLATE NOCASE
+                    OR COALESCE(last_ip, '') LIKE ?
+                ORDER BY username COLLATE NOCASE
+                LIMIT 200
+                """,
+                (needle, needle),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def admin_list_teams(self, admin_id: int) -> list[dict]:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            rows = connection.execute(
+                """
+                SELECT teams.id, teams.name, teams.created_at, users.username AS owner,
+                    COUNT(team_members.user_id) AS member_count
+                FROM teams
+                JOIN users ON users.id = teams.created_by
+                LEFT JOIN team_members ON team_members.team_id = teams.id
+                GROUP BY teams.id
+                ORDER BY teams.created_at DESC
+                LIMIT 200
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def admin_list_team_members(self, admin_id: int) -> list[dict]:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            rows = connection.execute(
+                """
+                SELECT team_members.team_id, teams.name AS team,
+                    team_members.user_id, users.username, team_members.role
+                FROM team_members
+                JOIN teams ON teams.id = team_members.team_id
+                JOIN users ON users.id = team_members.user_id
+                ORDER BY teams.name COLLATE NOCASE, users.username COLLATE NOCASE
+                LIMIT 1000
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def admin_list_messages(self, admin_id: int, search: str = "") -> list[dict]:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            needle = f"%{search.strip()}%"
+            rows = connection.execute(
+                """
+                SELECT messages.id, messages.body, messages.created_at,
+                    users.username AS author, teams.name AS team,
+                    COALESCE('#' || channels.name, 'Direct message') AS location
+                FROM messages
+                JOIN users ON users.id = messages.author_id
+                JOIN teams ON teams.id = messages.team_id
+                LEFT JOIN channels ON channels.id = messages.channel_id
+                WHERE messages.body LIKE ? COLLATE NOCASE
+                    OR users.username LIKE ? COLLATE NOCASE
+                    OR teams.name LIKE ? COLLATE NOCASE
+                ORDER BY messages.id DESC
+                LIMIT 200
+                """,
+                (needle, needle, needle),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def admin_set_user_role(
+        self, admin_id: int, target_id: int, role: str
+    ) -> None:
+        if role not in ("admin", "member"):
+            raise ChatError("Choose a valid account role.")
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            if target_id == admin_id and role != "admin":
+                raise ChatError("You cannot remove your own administrator access.")
+            if role == "member":
+                self._protect_last_admin(connection, target_id)
+            cursor = connection.execute(
+                "UPDATE users SET role = ? WHERE id = ?", (role, target_id)
+            )
+            if cursor.rowcount == 0:
+                raise ChatError("Account not found.")
+
+    def admin_set_user_active(
+        self, admin_id: int, target_id: int, active: bool
+    ) -> None:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            if target_id == admin_id and not active:
+                raise ChatError("You cannot deactivate your own account.")
+            if not active:
+                self._protect_last_admin(connection, target_id)
+            cursor = connection.execute(
+                "UPDATE users SET active = ? WHERE id = ?",
+                (int(active), target_id),
+            )
+            if cursor.rowcount == 0:
+                raise ChatError("Account not found.")
+            if not active:
+                connection.execute("DELETE FROM sessions WHERE user_id = ?", (target_id,))
+
+    def admin_kick_user(self, admin_id: int, target_id: int) -> None:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            if target_id == admin_id:
+                raise ChatError("You cannot kick your own account.")
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE user_id = ?", (target_id,)
+            )
+            if cursor.rowcount == 0:
+                raise ChatError("That account has no active sessions.")
+
+    def admin_delete_user(self, admin_id: int, target_id: int) -> None:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            if target_id == admin_id:
+                raise ChatError("You cannot delete your own account.")
+            self._protect_last_admin(connection, target_id)
+            exists = connection.execute(
+                "SELECT 1 FROM users WHERE id = ?", (target_id,)
+            ).fetchone()
+            if exists is None:
+                raise ChatError("Account not found.")
+            connection.execute(
+                "UPDATE teams SET created_by = ? WHERE created_by = ?",
+                (admin_id, target_id),
+            )
+            connection.execute(
+                "UPDATE channels SET created_by = ? WHERE created_by = ?",
+                (admin_id, target_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO team_members(team_id, user_id, role, joined_at)
+                SELECT team_id, ?, 'owner', ? FROM team_members
+                WHERE user_id = ? AND role = 'owner'
+                ON CONFLICT(team_id, user_id) DO UPDATE SET role = 'owner'
+                """,
+                (admin_id, _now(), target_id),
+            )
+            connection.execute(
+                "DELETE FROM messages WHERE author_id = ?", (target_id,)
+            )
+            connection.execute("DELETE FROM users WHERE id = ?", (target_id,))
+
+    def admin_remove_team_member(
+        self, admin_id: int, team_id: int, target_id: int
+    ) -> None:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            member = connection.execute(
+                "SELECT role FROM team_members WHERE team_id = ? AND user_id = ?",
+                (team_id, target_id),
+            ).fetchone()
+            if member is None:
+                raise ChatError("That account is not a member of this team.")
+            if member["role"] == "owner":
+                connection.execute(
+                    """
+                    INSERT INTO team_members(team_id, user_id, role, joined_at)
+                    VALUES (?, ?, 'owner', ?)
+                    ON CONFLICT(team_id, user_id) DO UPDATE SET role = 'owner'
+                    """,
+                    (team_id, admin_id, _now()),
+                )
+                connection.execute(
+                    "UPDATE teams SET created_by = ? WHERE id = ?",
+                    (admin_id, team_id),
+                )
+            connection.execute(
+                "DELETE FROM team_members WHERE team_id = ? AND user_id = ?",
+                (team_id, target_id),
+            )
+
+    def admin_delete_team(self, admin_id: int, team_id: int) -> None:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            cursor = connection.execute("DELETE FROM teams WHERE id = ?", (team_id,))
+            if cursor.rowcount == 0:
+                raise ChatError("Team not found.")
+
+    def admin_delete_message(self, admin_id: int, message_id: int) -> None:
+        with self._connect() as connection:
+            self._require_admin(connection, admin_id)
+            cursor = connection.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+            if cursor.rowcount == 0:
+                raise ChatError("Message not found.")
 
     def delete_session(self, token: str | None) -> None:
         if not isinstance(token, str) or not token:

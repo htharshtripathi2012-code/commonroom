@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import mimetypes
 import os
@@ -393,6 +394,7 @@ def _render_workspace(
       {f'<section class="nav-section"><div class="section-heading"><span>DIRECT MESSAGES</span><span class="count">{len(direct_messages)}</span></div>{dm_form}<nav aria-label="Direct messages">{dm_links or "<p class=sidebar-empty>No direct messages yet.</p>"}</nav></section>' if team else ''}
     </div>
     <div class="user-card"><span class="user-avatar">{_escape(user["username"][:1].upper())}</span><div class="user-detail"><strong>{_escape(user["username"])}</strong><span>On this network</span></div>
+      {('<a class="logout-button" href="/admin" aria-label="Administration">⚙</a>' if user.get("role") == "admin" else "")}
       <form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="logout-button" type="submit" aria-label="Log out">↗</button></form>
     </div>
   </aside>
@@ -415,6 +417,99 @@ def _render_workspace(
   <div class="app-frame">{workspace}</div>
 </body>
 </html>"""
+
+
+def _render_admin(
+    store: ChatStore,
+    user: dict,
+    csrf_token: str,
+    query: dict[str, list[str]],
+) -> str:
+    user_search = query.get("q", [""])[0][:100]
+    message_search = query.get("messages", [""])[0][:100]
+    error = query.get("error", [""])[0][:250]
+    done = query.get("done", [""])[0][:120]
+    users = store.admin_list_users(user["id"], user_search)
+    teams = store.admin_list_teams(user["id"])
+    memberships = store.admin_list_team_members(user["id"])
+    messages = store.admin_list_messages(user["id"], message_search)
+    team_rows = "".join(
+        f"""<tr><td>{_escape(team["name"])}</td><td>{_escape(team["owner"])}</td>
+<td>{team["member_count"]}</td><td>{_escape(team["created_at"][:16].replace("T", " "))}</td>
+<td><form action="/admin/teams/delete" method="post" onsubmit="return confirm('Delete this team and all its channels and messages?')">
+<input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<input type="hidden" name="team_id" value="{team["id"]}"><input type="hidden" name="return_to" value="/admin">
+<button class="admin-danger" type="submit">Delete team</button></form></td></tr>"""
+        for team in teams
+    ) or '<tr><td colspan="5">No teams.</td></tr>'
+    membership_rows = "".join(
+        f"""<tr><td>{_escape(member["team"])}</td><td>{_escape(member["username"])}</td>
+<td>{_escape(member["role"])}</td><td><form action="/admin/team-members/remove" method="post">
+<input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<input type="hidden" name="team_id" value="{member["team_id"]}">
+<input type="hidden" name="user_id" value="{member["user_id"]}">
+<input type="hidden" name="return_to" value="/admin">
+<button class="admin-button" type="submit">Remove from team</button></form></td></tr>"""
+        for member in memberships
+    ) or '<tr><td colspan="4">No team members.</td></tr>'
+    user_rows = "".join(
+        f"""<tr><td><strong>{_escape(item["username"])}</strong><small>{_escape(item["role"])} · {"active" if item["active"] else "disabled"}</small></td>
+<td>{_escape(item["last_ip"] or "Unknown")}<small>{_escape(item["last_seen"] or "No recorded activity")}</small></td>
+<td><div class="admin-actions">
+<form action="/admin/users/role" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<input type="hidden" name="user_id" value="{item["id"]}"><input type="hidden" name="return_to" value="/admin?q={_escape(user_search)}">
+<select name="role" aria-label="Role for {_escape(item["username"])}"><option value="member"{" selected" if item["role"] == "member" else ""}>Member</option><option value="admin"{" selected" if item["role"] == "admin" else ""}>Admin</option></select>
+<button class="admin-button" type="submit">Set role</button></form>
+<form action="/admin/users/kick" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<input type="hidden" name="user_id" value="{item["id"]}"><input type="hidden" name="return_to" value="/admin?q={_escape(user_search)}">
+<button class="admin-button" type="submit">Kick sessions</button></form>
+<form action="/admin/users/active" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<input type="hidden" name="user_id" value="{item["id"]}"><input type="hidden" name="active" value="{0 if item["active"] else 1}">
+<input type="hidden" name="return_to" value="/admin?q={_escape(user_search)}">
+<button class="admin-button" type="submit">{"Disable" if item["active"] else "Enable"}</button></form>
+<form action="/admin/users/delete" method="post" onsubmit="return confirm('Permanently delete this account and erase its messages?')">
+<input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="user_id" value="{item["id"]}">
+<input type="hidden" name="return_to" value="/admin?q={_escape(user_search)}">
+<button class="admin-danger" type="submit">Delete + erase</button></form></div></td></tr>"""
+        for item in users
+    ) or '<tr><td colspan="3">No accounts match.</td></tr>'
+    message_rows = "".join(
+        f"""<tr><td>{_escape(message["created_at"][:16].replace("T", " "))}</td>
+<td>{_escape(message["team"])} / {_escape(message["location"])}</td>
+<td>{_escape(message["author"])}</td><td class="admin-message">{_escape(message["body"])}</td>
+<td><form action="/admin/messages/delete" method="post" onsubmit="return confirm('Delete this message and its thread replies?')">
+<input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<input type="hidden" name="message_id" value="{message["id"]}"><input type="hidden" name="return_to" value="/admin?messages={_escape(message_search)}">
+<button class="admin-danger" type="submit">Delete</button></form></td></tr>"""
+        for message in messages
+    ) or '<tr><td colspan="5">No messages match.</td></tr>'
+    notice = (
+        f'<p class="notice error" role="alert">{_escape(error)}</p>' if error else
+        f'<p class="notice" role="status">{_escape(done)}</p>' if done else ""
+    )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin · Commonroom</title><link rel="stylesheet" href="/static/style.css"></head>
+<body class="admin-body"><main class="admin-shell">
+<header class="admin-header"><div><p class="eyebrow">COMMONROOM / CONTROL ROOM</p><h1>Administration</h1>
+<p class="muted">Signed in as {_escape(user["username"])}. Account activity records the connecting IP address.</p></div>
+<nav><a class="admin-button" href="/">Workspace</a>
+<form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="admin-button" type="submit">Log out</button></form></nav></header>
+{notice}
+<section class="admin-panel"><div class="admin-section-heading"><div><h2>Accounts</h2><p>Filter by username or last recorded IP. DNS resolver and device MAC are not visible to this server.</p></div>
+<form class="admin-search" action="/admin" method="get"><label class="sr-only" for="user-filter">Username or IP</label>
+<input id="user-filter" name="q" value="{_escape(user_search)}" placeholder="Username or IP"><button class="admin-button" type="submit">Filter</button></form></div>
+<div class="admin-table-wrap"><table><thead><tr><th>Account</th><th>Last IP / activity</th><th>Controls</th></tr></thead><tbody>{user_rows}</tbody></table></div>
+<p class="admin-footnote">Disable preserves account data and revokes sessions. Delete permanently erases the account, its messages and direct-message history; created teams/channels are reassigned to you.</p></section>
+<section class="admin-panel"><div class="admin-section-heading"><div><h2>Teams</h2><p>Delete a team and all associated channels, messages and memberships.</p></div></div>
+<div class="admin-table-wrap"><table><thead><tr><th>Team</th><th>Owner</th><th>Members</th><th>Created</th><th></th></tr></thead><tbody>{team_rows}</tbody></table></div></section>
+<section class="admin-panel"><div class="admin-section-heading"><div><h2>Team membership</h2><p>Remove users from teams; an owner removal transfers ownership to you.</p></div></div>
+<div class="admin-table-wrap"><table><thead><tr><th>Team</th><th>Member</th><th>Role</th><th></th></tr></thead><tbody>{membership_rows}</tbody></table></div></section>
+<section class="admin-panel"><div class="admin-section-heading"><div><h2>Message review</h2><p>Includes private messages. Showing at most 200 matching messages, newest first.</p></div>
+<form class="admin-search" action="/admin" method="get"><label class="sr-only" for="message-filter">Search messages</label>
+<input id="message-filter" name="messages" value="{_escape(message_search)}" placeholder="Search text, author, or team"><button class="admin-button" type="submit">Search</button></form></div>
+<div class="admin-table-wrap"><table><thead><tr><th>Created</th><th>Location</th><th>Author</th><th>Message</th><th></th></tr></thead><tbody>{message_rows}</tbody></table></div></section>
+</main></body></html>"""
 
 
 class ChatRequestHandler(BaseHTTPRequestHandler):
@@ -450,7 +545,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             method = self.command if self.command in ("GET", "POST") else "OTHER"
             print(
                 f"[chat] request_id={self._request_id} method={method} "
-                f"client={self.address_string()} route={route} "
+                f"client={self._client_ip()} route={route} "
                 f"status={self._response_status} duration_ms={duration_ms} "
                 f"error={self._request_error}"
             )
@@ -468,7 +563,20 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             return None
         morsel = cookie.get(_COOKIE_NAME)
-        return self.store.get_session(morsel.value if morsel else None)
+        session = self.store.get_session(morsel.value if morsel else None)
+        if session is not None:
+            self.store.record_activity(session["user"]["id"], self._client_ip())
+        return session
+
+    def _client_ip(self) -> str:
+        remote_ip = self.client_address[0]
+        if os.environ.get("CHAT_TRUST_PROXY", "").lower() in ("1", "true", "yes", "on"):
+            proxy_ip = self.headers.get("X-Real-IP", "")
+            try:
+                return str(ipaddress.ip_address(proxy_ip))
+            except ValueError:
+                pass
+        return str(ipaddress.ip_address(remote_ip))
 
     def _handle_get(self) -> None:
         request = urlsplit(self.path)
@@ -497,6 +605,30 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(error)}, status=400)
                 return
             self._send_json({"messages": messages})
+            return
+        if request.path == "/admin":
+            session = self._session()
+            if session is None:
+                self._redirect("/login")
+                return
+            if session["user"]["role"] != "admin":
+                self._send_html(
+                    _render_auth_page(
+                        "Administrator access required",
+                        "This area is only available to site administrators.",
+                        '<a class="button-link" href="/">Return to workspace</a>',
+                    ),
+                    status=403,
+                )
+                return
+            self._send_html(
+                _render_admin(
+                    self.store,
+                    session["user"],
+                    session["csrf_token"],
+                    parse_qs(request.query),
+                )
+            )
             return
         if request.path == "/login":
             if self._session():
@@ -589,6 +721,66 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         return_to = _safe_return_to(form.get("return_to"))
 
         try:
+            if request.path.startswith("/admin/"):
+                if user["role"] != "admin":
+                    self._send_html(
+                        _render_auth_page(
+                            "Administrator access required",
+                            "This action is only available to site administrators.",
+                            '<a class="button-link" href="/">Return to workspace</a>',
+                        ),
+                        status=403,
+                    )
+                    return
+                if request.path == "/admin/users/role":
+                    self.store.admin_set_user_role(
+                        user["id"],
+                        _int_value(form.get("user_id"), "account"),
+                        form.get("role", ""),
+                    )
+                elif request.path == "/admin/users/active":
+                    active_value = form.get("active", "")
+                    if active_value not in ("0", "1"):
+                        raise ChatError("Choose whether the account should be enabled.")
+                    self.store.admin_set_user_active(
+                        user["id"],
+                        _int_value(form.get("user_id"), "account"),
+                        active_value == "1",
+                    )
+                elif request.path == "/admin/users/kick":
+                    self.store.admin_kick_user(
+                        user["id"], _int_value(form.get("user_id"), "account")
+                    )
+                elif request.path == "/admin/users/delete":
+                    self.store.admin_delete_user(
+                        user["id"], _int_value(form.get("user_id"), "account")
+                    )
+                elif request.path == "/admin/team-members/remove":
+                    self.store.admin_remove_team_member(
+                        user["id"],
+                        _int_value(form.get("team_id"), "team"),
+                        _int_value(form.get("user_id"), "account"),
+                    )
+                elif request.path == "/admin/teams/delete":
+                    self.store.admin_delete_team(
+                        user["id"], _int_value(form.get("team_id"), "team")
+                    )
+                elif request.path == "/admin/messages/delete":
+                    self.store.admin_delete_message(
+                        user["id"], _int_value(form.get("message_id"), "message")
+                    )
+                else:
+                    self._send_html(
+                        _render_auth_page(
+                            "Not found",
+                            "That action does not exist.",
+                            '<a class="button-link" href="/admin">Return to administration</a>',
+                        ),
+                        status=404,
+                    )
+                    return
+                self._redirect("/admin?done=Changes%20saved")
+                return
             if request.path == "/logout":
                 self.store.delete_session(self._session_token())
                 self._redirect("/login", cookie=self._expired_cookie())
@@ -757,6 +949,17 @@ def create_server(
             "CHAT_DB_PATH", str(Path(__file__).parent / "data" / "commonroom.sqlite3")
         )
     store = ChatStore(db_path)
+    has_admin_password = "CHAT_ADMIN_PASSWORD" in os.environ
+    has_admin_username = "CHAT_ADMIN_USERNAME" in os.environ
+    if has_admin_password != has_admin_username:
+        raise RuntimeError(
+            "Set both CHAT_ADMIN_USERNAME and CHAT_ADMIN_PASSWORD to bootstrap an administrator."
+        )
+    if has_admin_password:
+        store.configure_admin(
+            os.environ["CHAT_ADMIN_USERNAME"],
+            os.environ["CHAT_ADMIN_PASSWORD"],
+        )
     handler = type("BoundChatRequestHandler", (ChatRequestHandler,), {"store": store})
     return ThreadingHTTPServer((host, port), handler)
 

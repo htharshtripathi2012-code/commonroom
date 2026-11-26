@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,92 @@ class ChatStoreTests(unittest.TestCase):
             self.store.send_message(
                 self.alice["id"], "channel", self.channel_id, "x" * 4001
             )
+
+    def test_admin_can_filter_activity_review_and_moderate_users(self):
+        admin = self.store.configure_admin("admin", "unique-admin-password")
+        self.store.record_activity(self.bob["id"], "192.0.2.25")
+        dm_id = self.store.create_direct_message(
+            self.team["id"], self.alice["id"], "bob"
+        )
+        private_message = self.store.send_message(
+            self.bob["id"], "dm", dm_id, "Private message for review"
+        )
+
+        self.assertEqual(
+            self.store.admin_list_users(admin["id"], "192.0.2.25")[0]["username"],
+            "bob",
+        )
+        reviewed = self.store.admin_list_messages(admin["id"], "Private message")
+        self.assertEqual(reviewed[0]["body"], "Private message for review")
+        self.store.admin_delete_message(admin["id"], private_message["id"])
+        self.assertEqual(self.store.admin_list_messages(admin["id"]), [])
+
+        token, _ = self.store.create_session(self.bob["id"])
+        self.store.admin_kick_user(admin["id"], self.bob["id"])
+        self.assertIsNone(self.store.get_session(token))
+        self.store.admin_set_user_active(admin["id"], self.bob["id"], False)
+        self.assertIsNone(self.store.authenticate("bob", "another-secure-password"))
+        with self.assertRaisesRegex(ChatError, "cannot deactivate your own"):
+            self.store.admin_set_user_active(admin["id"], admin["id"], False)
+
+    def test_admin_deletion_erases_user_content_and_transfers_team_ownership(self):
+        admin = self.store.configure_admin("admin", "unique-admin-password")
+        self.store.send_message(
+            self.alice["id"], "channel", self.channel_id, "Remove with account"
+        )
+
+        self.store.admin_delete_user(admin["id"], self.alice["id"])
+
+        teams = self.store.admin_list_teams(admin["id"])
+        self.assertEqual(teams[0]["owner"], "admin")
+        members = self.store.admin_list_team_members(admin["id"])
+        self.assertTrue(
+            any(
+                member["username"] == "admin"
+                and member["role"] == "owner"
+                and member["team_id"] == self.team["id"]
+                for member in members
+            )
+        )
+        self.assertEqual(self.store.admin_list_messages(admin["id"]), [])
+        self.assertNotIn(
+            "alice",
+            [user["username"] for user in self.store.admin_list_users(admin["id"])],
+        )
+
+    def test_admin_actions_require_an_admin_and_protect_last_admin(self):
+        admin = self.store.configure_admin("admin", "unique-admin-password")
+        with self.assertRaisesRegex(ChatError, "Administrator access"):
+            self.store.admin_list_users(self.bob["id"])
+        with self.assertRaisesRegex(ChatError, "cannot remove your own administrator"):
+            self.store.admin_set_user_role(admin["id"], admin["id"], "member")
+
+    def test_existing_database_gets_admin_and_activity_columns(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    username_key TEXT NOT NULL UNIQUE,
+                    salt BLOB NOT NULL,
+                    password_hash BLOB NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+
+        upgraded = ChatStore(legacy_path)
+        user = upgraded.create_user("legacy", "legacy-secure-password")
+        upgraded.record_activity(user["id"], "192.0.2.9")
+        upgraded.configure_admin("legacy", "unused-existing-account-password")
+        self.assertEqual(
+            upgraded.admin_list_users(user["id"])[0]["role"], "admin"
+        )
+        self.assertEqual(
+            upgraded.admin_list_users(user["id"])[0]["last_ip"], "192.0.2.9"
+        )
 
 
 if __name__ == "__main__":

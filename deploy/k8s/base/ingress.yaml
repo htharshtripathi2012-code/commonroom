@@ -7,9 +7,8 @@ metadata:
     app.kubernetes.io/name: commonroom
     app.kubernetes.io/part-of: commonroom
 spec:
-  ingressClassName: traefik
   rules:
-    - host: chat.test
+    - host: ""
       http:
         paths:
           - path: /

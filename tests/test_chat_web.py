@@ -211,6 +211,48 @@ class ChatWebTests(unittest.TestCase):
             "Private message across devices",
         )
 
+    def test_admin_gets_separate_dashboard_and_members_are_denied(self):
+        self.request(
+            "/signup",
+            {"username": "alice", "password": "a-secure-local-password"},
+        )
+        store = self.server.RequestHandlerClass.store
+        store.configure_admin("alice", "ignored-existing-account-password")
+        status, _, page = self.request("/admin")
+        self.assertEqual(status, 200)
+        self.assertIn("Administration", page)
+        self.assertIn("Message review", page)
+        self.assertIn("DNS resolver and device MAC are not visible", page)
+
+        bob_opener = build_opener(HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.request(
+            "/signup",
+            {"username": "bob", "password": "another-secure-password"},
+            opener=bob_opener,
+        )
+        _, _, bob_home = self.request("/", opener=bob_opener)
+        with self.assertRaises(HTTPError) as context:
+            self.request("/admin", opener=bob_opener)
+        self.assertEqual(context.exception.code, 403)
+        context.exception.close()
+        admin_id = store.authenticate("alice", "a-secure-local-password")["id"]
+        bob_id = next(
+            item["id"]
+            for item in store.admin_list_users(admin_id)
+            if item["username"] == "bob"
+        )
+        _, _, admin_page = self.request("/admin")
+        self.request(
+            "/admin/users/kick",
+            {
+                "csrf_token": self.csrf_token(admin_page),
+                "user_id": bob_id,
+                "return_to": "/admin",
+            },
+        )
+        _, final_url, _ = self.request("/", opener=bob_opener)
+        self.assertTrue(final_url.endswith("/login"))
+
 
 if __name__ == "__main__":
     unittest.main()

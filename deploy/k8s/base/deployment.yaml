@@ -45,6 +45,20 @@ spec:
               value: "false"
             - name: CHAT_DB_PATH
               value: /data/commonroom.sqlite3
+            - name: CHAT_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: commonroom-admin
+                  key: username
+                  optional: true
+            - name: CHAT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: commonroom-admin
+                  key: password
+                  optional: true
+            - name: CHAT_TRUST_PROXY
+              value: "true"
           volumeMounts:
             - name: data
               mountPath: /data

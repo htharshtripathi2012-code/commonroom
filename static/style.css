@@ -82,6 +82,70 @@ input::selection, textarea::selection {
   }
 }
 
+.admin-body { padding: 32px 20px 64px; }
+.admin-shell { width: min(1440px, 100%); margin: 0 auto; }
+.admin-header, .admin-section-heading, .admin-header nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.admin-header { margin-bottom: 24px; }
+.admin-header h1 { margin: 4px 0; font: 42px/1.1 var(--font-display); }
+.admin-header .muted, .admin-section-heading p, .admin-footnote {
+  color: var(--muted);
+  font-size: 13px;
+}
+.admin-header nav, .admin-header nav form { display: flex; gap: 8px; }
+.admin-panel {
+  margin: 18px 0;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--sidebar);
+}
+.admin-section-heading { margin-bottom: 14px; }
+.admin-section-heading h2 { margin: 0; font: 24px/1.2 var(--font-display); }
+.admin-section-heading p { margin: 6px 0 0; }
+.admin-search, .admin-actions, .admin-actions form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.admin-search input { min-width: 220px; }
+.admin-table-wrap { overflow-x: auto; }
+.admin-panel table { width: 100%; border-collapse: collapse; text-align: left; }
+.admin-panel th, .admin-panel td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.admin-panel th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.admin-panel td { font-size: 13px; }
+.admin-panel td small { display: block; margin-top: 4px; color: var(--muted); }
+.admin-panel td form { margin: 0; }
+.admin-panel select, .admin-panel input { min-width: 120px; }
+.admin-message { min-width: 240px; max-width: 520px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.admin-button, .admin-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.admin-danger { color: var(--danger); }
+.admin-button:hover, .admin-danger:hover { border-color: var(--accent); }
+.admin-footnote { margin: 12px 0 0; }
+
 * { box-sizing: border-box; }
 
 body {
