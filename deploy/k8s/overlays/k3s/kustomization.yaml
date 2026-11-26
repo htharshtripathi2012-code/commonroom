@@ -4,4 +4,4 @@ resources:
   - ../../base
 images:
   - name: ghcr.io/htharshtripathi2012-code/chess
-    newTag: latest
+    newTag: a8cf52445e1c000cb263ca4e1678a86ba9dbe786
