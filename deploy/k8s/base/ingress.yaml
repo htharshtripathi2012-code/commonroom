@@ -9,7 +9,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: chat.local
+    - host: chat.test
       http:
         paths:
           - path: /
